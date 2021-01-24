@@ -1,0 +1,21 @@
+[package]
+name = "sxd-string-slab"
+version = "0.1.0"
+authors = ["Jake Goulding <jake.goulding@gmail.com>"]
+edition = "2018"
+
+description = "A string interning pool tailored for XML documents"
+keywords = ["string", "intern", "pool"]
+
+repository = "https://github.com/shepmaster/sxd-string-slab"
+documentation = "https://docs.rs/sxd-string-slab"
+
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+hashbrown = { version = "0.9.1", default-features = false, features = ["ahash", "inline-more"] }
+
+[dev-dependencies]
+proptest = "0.10.1"
+rand = "0.7.3"
+once_cell = "1.5.2"
