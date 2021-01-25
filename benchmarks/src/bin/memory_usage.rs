@@ -1,0 +1,53 @@
+use benchmarks::{alloc::TrackingAllocator, env_or, DUPLICATES_STRING, NO_DUPLICATES_STRING};
+use hashbrown::HashSet;
+use once_cell::sync::Lazy;
+use std::convert::TryFrom;
+use sxd_string_slab::StringArena;
+
+#[global_allocator]
+static A: TrackingAllocator = TrackingAllocator;
+
+fn main() {
+    let show_map = env_or("SHOW_MAP", false);
+    Lazy::force(&NO_DUPLICATES_STRING);
+    Lazy::force(&DUPLICATES_STRING);
+
+    let total_length: usize = DUPLICATES_STRING.lines().map(str::len).sum();
+    let total_length_f64 = f64::from(u32::try_from(total_length).unwrap());
+
+    eprintln!("String data of {} bytes", total_length);
+
+    let (_arena, alloc_size, alloc_count, alloc_map) = TrackingAllocator::track_allocations(|| {
+        let mut arena = StringArena::new();
+        for s in DUPLICATES_STRING.lines() {
+            arena.intern(s);
+        }
+        arena
+    });
+
+    let percent = f64::from(u32::try_from(alloc_size).unwrap()) / total_length_f64 * 100.0;
+    eprintln!(
+        "sxd_string_slab::StringArena: {} bytes ({:.2}%) in {} allocations",
+        alloc_size, percent, alloc_count
+    );
+    if show_map {
+        eprintln!("{:?}", alloc_map);
+    }
+
+    let (_arena, alloc_size, alloc_count, alloc_map) = TrackingAllocator::track_allocations(|| {
+        let mut arena = HashSet::new();
+        for s in DUPLICATES_STRING.lines() {
+            arena.get_or_insert_owned(s);
+        }
+        arena
+    });
+
+    let percent = f64::from(u32::try_from(alloc_size).unwrap()) / total_length_f64 * 100.0;
+    eprintln!(
+        "hashbrown::HashSet: {} bytes ({:.2}%) in {} allocations",
+        alloc_size, percent, alloc_count
+    );
+    if show_map {
+        eprintln!("{:?}", alloc_map);
+    }
+}
