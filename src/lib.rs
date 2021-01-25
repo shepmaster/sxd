@@ -62,6 +62,7 @@ impl Borrow<str> for RawStr {
 #[derive(Debug)]
 struct StringSlabBuilder {
     slab: StringSlab,
+    slab_size: usize,
     len: usize,
 }
 
@@ -70,20 +71,23 @@ enum AppendStatus {
     Cycled(StringSlab, RawStr),
 }
 
-impl Default for StringSlabBuilder {
-    fn default() -> Self {
+impl StringSlabBuilder {
+    fn with_slab_size(slab_size: usize) -> Self {
         Self {
-            slab: StringSlab::with_capacity(Self::SLAB_SIZE),
+            slab: StringSlab::with_capacity(slab_size),
+            slab_size,
             len: 0,
         }
     }
-}
 
-impl StringSlabBuilder {
-    const SLAB_SIZE: usize = 1024;
+    fn cycle(&mut self) -> StringSlab {
+        let new = StringSlab::with_capacity(self.slab_size);
+        self.len = 0;
+        mem::replace(&mut self.slab, new)
+    }
 
     fn append(&mut self, v: &[u8]) -> AppendStatus {
-        let fits_in_slab = v.len() <= Self::SLAB_SIZE;
+        let fits_in_slab = v.len() <= self.slab_size;
         let fits_in_remaining_capacity = v.len() <= self.slab.capacity - self.len;
 
         match (fits_in_slab, fits_in_remaining_capacity) {
@@ -103,14 +107,14 @@ impl StringSlabBuilder {
             (_, false) => {
                 // Adding the new data would overflow the slab, so we cycle into a new slab.
 
-                let old = mem::take(self);
+                let slab = self.cycle();
 
                 // SAFETY: We've created a new slab, so we are guaranteed that the incoming
                 // string can fit.
                 unsafe {
                     let s = self.slab.append(self.len, v);
                     self.len += v.len();
-                    AppendStatus::Cycled(old.slab, s)
+                    AppendStatus::Cycled(slab, s)
                 }
             }
 
@@ -174,17 +178,35 @@ impl Drop for StringSlab {
 pub struct Key(RawStr);
 
 /// A string interning pool.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StringArena {
     lookup: HashSet<RawStr>,
     current_slab: StringSlabBuilder,
     slabs: LinkedList<StringSlab>,
 }
 
+impl Default for StringArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StringArena {
-    /// Creates an empty pool.
+    /// The default size of a memory slab.
+    pub const DEFAULT_SLAB_SIZE: usize = 1024;
+
+    /// Creates an empty pool using the [default slab size](Self::DEFAULT_SLAB_SIZE).
     pub fn new() -> Self {
-        Self::default()
+        Self::with_slab_size(Self::DEFAULT_SLAB_SIZE)
+    }
+
+    /// Creates an empty pool using the specified slab size.
+    pub fn with_slab_size(slab_size: usize) -> Self {
+        Self {
+            lookup: Default::default(),
+            current_slab: StringSlabBuilder::with_slab_size(slab_size),
+            slabs: Default::default(),
+        }
     }
 
     /// Add a string to the pool.
