@@ -6,6 +6,7 @@
 use hashbrown::HashSet;
 use std::{
     borrow::Borrow,
+    cell::RefCell,
     collections::LinkedList,
     hash::{Hash, Hasher},
     mem,
@@ -238,7 +239,73 @@ impl UnsafeArena {
     /// Nothing enforces that this key came from this arena. If it did not, then this will cause
     /// undefined behavior.
     pub unsafe fn as_str(&self, key: UnsafeKey) -> &str {
+        self.as_unbound_str(key)
+    }
+
+    /// Convert an [`UnsafeKey`] into a string.
+    ///
+    /// # Safety
+    ///
+    /// Nothing enforces that this key came from this arena. If it did not, then this will cause
+    /// undefined behavior. This method allows the *caller* to decide what the lifetime should be,
+    /// and should be used with great caution.
+    unsafe fn as_unbound_str<'a>(&self, key: UnsafeKey) -> &'a str {
         key.0.as_unbound_str()
+    }
+}
+
+/// Provides a safe interface to an arena by ensuring that all returned references are tied to the
+/// arena.
+///
+/// This arena may not be suitable for cases where you need to move the arena after interning
+/// values.
+///
+/// # Examples
+///
+/// ```rust
+/// # use sxd_string_slab::RootedArena;
+/// use std::ptr;
+///
+/// let input_1 = &*String::from("hello");
+/// let input_2 = &*String::from("hello");
+///
+/// let arena = RootedArena::new();
+///
+/// let output_1 = arena.intern(input_1);
+/// let output_2 = arena.intern(input_2);
+///
+/// assert_eq!("hello", output_1);
+/// assert_eq!("hello", output_2);
+///
+/// assert!(!ptr::eq(input_1, input_2), "Input strings refer to the same value");
+/// assert!(ptr::eq(output_1, output_2), "Output strings do not refer to the same value");
+/// ```
+#[derive(Debug, Default)]
+pub struct RootedArena(RefCell<UnsafeArena>);
+
+impl RootedArena {
+    /// Creates an empty pool using the [default slab size](UnsafeArena::DEFAULT_SLAB_SIZE).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an empty pool using the specified slab size.
+    pub fn with_slab_size(slab_size: usize) -> Self {
+        Self(RefCell::new(UnsafeArena::with_slab_size(slab_size)))
+    }
+
+    /// Add a string to the pool.
+    ///
+    /// If it's not already present, the string will be copied to the pool.
+    pub fn intern(&self, s: &str) -> &str {
+        let mut arena = self.0.borrow_mut();
+
+        // SAFETY: We can trivially show that this key came from this arena, and we tie the lifetime
+        // to ourselves, which is also how long the `UnsafeArena` will last.
+        unsafe {
+            let key = arena.intern(s);
+            arena.as_unbound_str(key)
+        }
     }
 }
 
