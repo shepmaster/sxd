@@ -193,7 +193,7 @@ impl Default for StringArena {
 
 impl StringArena {
     /// The default size of a memory slab.
-    pub const DEFAULT_SLAB_SIZE: usize = 1024;
+    pub const DEFAULT_SLAB_SIZE: usize = 128 * 1024;
 
     /// Creates an empty pool using the [default slab size](Self::DEFAULT_SLAB_SIZE).
     pub fn new() -> Self {
