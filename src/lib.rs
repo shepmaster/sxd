@@ -182,7 +182,7 @@ impl StringArena {
     /// Add a string to the pool.
     ///
     /// If it's not already present, the string will be copied to the pool. The returned [`Key`] can
-    /// be used to tell if two strings are identical.
+    /// be used to tell if two strings are identical or get the string data.
     pub fn intern(&mut self, s: &str) -> Key {
         let Self {
             lookup,
