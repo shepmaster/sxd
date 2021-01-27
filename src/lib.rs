@@ -10,6 +10,7 @@ use std::{
     collections::LinkedList,
     hash::{Hash, Hasher},
     mem,
+    ops::Index,
     ptr::{self, NonNull},
     slice, str,
 };
@@ -308,6 +309,79 @@ impl RootedArena {
         }
     }
 }
+
+/// Provides a safe interface to an arena by ensuring that all keys came from this arena.
+///
+/// # Examples
+///
+/// ```rust
+/// # use sxd_string_slab::CheckedArena;
+/// let arena = CheckedArena::new();
+/// let another_arena = CheckedArena::new();
+///
+/// let key = arena.intern("hello");
+///
+/// // Use `as_str` to get a string back from the arena. If the wrong arena is used, this will
+/// // return `None`.
+/// assert_eq!(Some("hello"), arena.as_str(key));
+/// assert_eq!(None, another_arena.as_str(key));
+///
+/// // Use indexing syntax if you are sure the key came from this arena.
+/// assert_eq!("hello", &arena[key]);
+/// ```
+#[derive(Debug, Default)]
+pub struct CheckedArena(Box<RefCell<UnsafeArena>>);
+
+impl CheckedArena {
+    /// Creates an empty pool using the [default slab size](UnsafeArena::DEFAULT_SLAB_SIZE).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an empty pool using the specified slab size.
+    pub fn with_slab_size(slab_size: usize) -> Self {
+        Self(Box::new(RefCell::new(UnsafeArena::with_slab_size(
+            slab_size,
+        ))))
+    }
+
+    /// Add a string to the pool.
+    ///
+    /// If it's not already present, the string will be copied to the pool. The returned
+    /// [`CheckedKey`] can be used to tell if two strings are identical or get the string data.
+    pub fn intern(&self, s: &str) -> CheckedKey {
+        let key = self.0.borrow_mut().intern(s);
+        CheckedKey(&*self.0, key)
+    }
+
+    /// Convert a [`CheckedKey`] into a string.
+    ///
+    /// If the `CheckedKey` did not come from this arena, `None` is returned.
+    pub fn as_str(&self, key: CheckedKey) -> Option<&str> {
+        // SAFETY: We ensure that the key comes from the same arena that it was generated from, and
+        // we tie the lifetime to ourselves, so it cannot outlast the arena.
+        unsafe {
+            if ptr::eq(&*self.0, key.0) {
+                Some(RefCell::borrow(&self.0).as_unbound_str(key.1))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl Index<CheckedKey> for CheckedArena {
+    type Output = str;
+    fn index(&self, key: CheckedKey) -> &str {
+        self.as_str(key).expect("The key is not from this arena")
+    }
+}
+
+/// An opaque handle to an interned string.
+///
+/// Use [`CheckedArena::as_str`] if you need the string data.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct CheckedKey(*const RefCell<UnsafeArena>, UnsafeKey);
 
 #[cfg(test)]
 mod test {
