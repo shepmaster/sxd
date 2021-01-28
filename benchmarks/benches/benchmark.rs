@@ -4,7 +4,7 @@ use hashbrown::HashSet;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use std::{convert::TryInto, iter};
-use sxd_string_slab::StringArena;
+use sxd_string_slab::UnsafeArena;
 
 fn without_duplicates(c: &mut Criterion) {
     Lazy::force(&WITHOUT_DUPLICATES);
@@ -15,9 +15,9 @@ fn without_duplicates(c: &mut Criterion) {
         WITHOUT_DUPLICATES.len().try_into().unwrap(),
     ));
 
-    group.bench_function("sxd_string_slab::StringArena", |b| {
+    group.bench_function("sxd_string_slab::UnsafeArena", |b| {
         b.iter(|| {
-            let mut arena = StringArena::new();
+            let mut arena = UnsafeArena::new();
             for s in &*WITHOUT_DUPLICATES {
                 arena.intern(s);
             }
@@ -45,9 +45,9 @@ fn with_duplicates(c: &mut Criterion) {
         WITH_DUPLICATES.len().try_into().unwrap(),
     ));
 
-    group.bench_function("sxd_string_slab::StringArena", |b| {
+    group.bench_function("sxd_string_slab::UnsafeArena", |b| {
         b.iter(|| {
-            let mut arena = StringArena::new();
+            let mut arena = UnsafeArena::new();
             for s in &*WITH_DUPLICATES {
                 arena.intern(s);
             }
@@ -87,7 +87,7 @@ fn slab_vs_string_length(c: &mut Criterion) {
 
         group.bench_with_input(id, &args, |b, &(slab_size, _max_str_len)| {
             b.iter(|| {
-                let mut arena = StringArena::with_slab_size(slab_size);
+                let mut arena = UnsafeArena::with_slab_size(slab_size);
                 for s in &input {
                     arena.intern(s);
                 }

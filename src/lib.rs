@@ -173,25 +173,25 @@ impl Drop for StringSlab {
 
 /// An opaque handle to an interned string.
 ///
-/// Use [`StringArena::as_str`] if you need the string data.
+/// Use [`UnsafeArena::as_str`] if you need the string data.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct Key(RawStr);
+pub struct UnsafeKey(RawStr);
 
 /// A string interning pool.
 #[derive(Debug)]
-pub struct StringArena {
+pub struct UnsafeArena {
     lookup: HashSet<RawStr>,
     current_slab: StringSlabBuilder,
     slabs: LinkedList<StringSlab>,
 }
 
-impl Default for StringArena {
+impl Default for UnsafeArena {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StringArena {
+impl UnsafeArena {
     /// The default size of a memory slab.
     pub const DEFAULT_SLAB_SIZE: usize = 128 * 1024;
 
@@ -211,9 +211,9 @@ impl StringArena {
 
     /// Add a string to the pool.
     ///
-    /// If it's not already present, the string will be copied to the pool. The returned [`Key`] can
-    /// be used to tell if two strings are identical or get the string data.
-    pub fn intern(&mut self, s: &str) -> Key {
+    /// If it's not already present, the string will be copied to the pool. The returned
+    /// [`UnsafeKey`] can be used to tell if two strings are identical or get the string data.
+    pub fn intern(&mut self, s: &str) -> UnsafeKey {
         let Self {
             lookup,
             current_slab,
@@ -228,16 +228,16 @@ impl StringArena {
             }
         });
 
-        Key(raw_str)
+        UnsafeKey(raw_str)
     }
 
-    /// Convert a [`Key`] into a string.
+    /// Convert an [`UnsafeKey`] into a string.
     ///
     /// # Safety
     ///
     /// Nothing enforces that this key came from this arena. If it did not, then this will cause
     /// undefined behavior.
-    pub unsafe fn as_str(&self, key: Key) -> &str {
+    pub unsafe fn as_str(&self, key: UnsafeKey) -> &str {
         key.0.as_unbound_str()
     }
 }
@@ -253,7 +253,7 @@ mod test {
 
     #[test]
     fn interning_twice_creates_equal_values() {
-        let mut arena = StringArena::default();
+        let mut arena = UnsafeArena::default();
         let a = arena.intern("hello");
         let b = arena.intern("hello");
         assert_eq!(a, b);
@@ -261,7 +261,7 @@ mod test {
 
     #[test]
     fn interning_two_values_creates_non_equal_values() {
-        let mut arena = StringArena::default();
+        let mut arena = UnsafeArena::default();
         let a = arena.intern("hello");
         let b = arena.intern("world");
         assert_ne!(a, b);
@@ -269,7 +269,7 @@ mod test {
 
     #[test]
     fn interning_preserves_string_values() {
-        let mut arena = StringArena::default();
+        let mut arena = UnsafeArena::default();
         let a = arena.intern("hello");
         let b = arena.intern("world");
 
@@ -281,7 +281,7 @@ mod test {
 
     #[test]
     fn interning_has_equal_pointer() {
-        let mut arena = StringArena::default();
+        let mut arena = UnsafeArena::default();
         let a = arena.intern("hello");
         let b = arena.intern("hello");
 
@@ -327,7 +327,7 @@ mod test {
 
         #[test]
         fn all_interned_keys_equal_each_other(s in highly_duplicated::<String>()) {
-            let mut arena = StringArena::default();
+            let mut arena = UnsafeArena::default();
             let mut by_string = HashMap::with_capacity(s.len());
 
             for s in s {

@@ -4,7 +4,7 @@ use benchmarks::{
 use hashbrown::HashSet;
 use once_cell::sync::Lazy;
 use std::convert::TryFrom;
-use sxd_string_slab::StringArena;
+use sxd_string_slab::UnsafeArena;
 
 #[global_allocator]
 static A: TrackingAllocator = TrackingAllocator;
@@ -20,7 +20,7 @@ fn main() {
     eprintln!("String data of {} bytes", total_length);
 
     let (_arena, alloc_size, alloc_count, alloc_map) = TrackingAllocator::track_allocations(|| {
-        let mut arena = StringArena::new();
+        let mut arena = UnsafeArena::new();
         for s in WITH_DUPLICATES_STRING.lines() {
             arena.intern(s);
         }
@@ -29,7 +29,7 @@ fn main() {
 
     let percent = f64::from(u32::try_from(alloc_size).unwrap()) / total_length_f64 * 100.0;
     eprintln!(
-        "sxd_string_slab::StringArena: {} bytes ({:.2}%) in {} allocations",
+        "sxd_string_slab::UnsafeArena: {} bytes ({:.2}%) in {} allocations",
         alloc_size, percent, alloc_count
     );
     if show_map {
