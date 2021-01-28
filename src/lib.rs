@@ -13,6 +13,10 @@ use std::{
     slice, str,
 };
 
+/// # Safety
+///
+/// ⚠ **This type unsafely implements safe traits** ⚠. Extreme care should be taken when using any
+/// trait, even if it is not marked as unsafe.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct RawStr(*const u8, usize);
 
@@ -36,6 +40,8 @@ impl RawStr {
     }
 }
 
+/// SAFETY: This is **not** actually safe. The user of `RawStr` must ensure that the safety contract
+/// of [`Self::as_str`] is upheld to use this trait.
 impl Hash for RawStr {
     fn hash<H>(&self, h: &mut H)
     where
@@ -45,6 +51,8 @@ impl Hash for RawStr {
     }
 }
 
+/// SAFETY: This is **not** actually safe. The user of `RawStr` must ensure that the safety contract
+/// of [`Self::as_str`] is upheld to use this trait.
 impl Borrow<str> for RawStr {
     fn borrow(&self) -> &str {
         unsafe { self.as_str() }
