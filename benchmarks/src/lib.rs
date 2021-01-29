@@ -156,27 +156,23 @@ pub fn rng() -> StdRng {
     StdRng::seed_from_u64(*SEED)
 }
 
-pub fn string_iter(rng: &mut impl Rng) -> impl Iterator<Item = String> + '_ {
+fn string_iter(rng: &mut impl Rng, max_len: usize) -> impl Iterator<Item = String> + '_ {
     iter::from_fn(move || {
-        let string_len = rng.gen_range(0, 2048);
+        let string_len = rng.gen_range(0, max_len);
         Some(rng.sample_iter(Alphanumeric).take(string_len).collect())
     })
 }
 
-pub static NO_DUPLICATES: Lazy<HashSet<String>> = Lazy::new(|| {
+pub fn generate_without_duplicates(n_items: usize, max_str_len: usize) -> HashSet<String> {
     let rng = &mut rng();
 
-    let n_items = env_or("N_NO_DUPLICATES", 10_000);
-    string_iter(rng).take(n_items).collect()
-});
+    string_iter(rng, max_str_len).take(n_items).collect()
+}
 
-pub static NO_DUPLICATES_STRING: Lazy<String> = Lazy::new(|| NO_DUPLICATES.iter().join("\n"));
-
-pub static DUPLICATES: Lazy<Vec<String>> = Lazy::new(|| {
+pub fn generate_with_duplicates(n_items: usize, max_str_len: usize) -> Vec<String> {
     let rng = &mut rng();
 
-    let n_items = env_or("N_DUPLICATES", 10_000);
-    let no_dupes: HashSet<_> = string_iter(rng).take(n_items).collect();
+    let no_dupes: HashSet<_> = string_iter(rng, max_str_len).take(n_items).collect();
     let mut no_dupes: Vec<_> = no_dupes.into_iter().collect();
 
     let n_dupes = rng.gen_range(0, no_dupes.len());
@@ -185,6 +181,19 @@ pub static DUPLICATES: Lazy<Vec<String>> = Lazy::new(|| {
     no_dupes.shuffle(rng);
 
     no_dupes
+}
+
+pub static WITHOUT_DUPLICATES: Lazy<HashSet<String>> = Lazy::new(|| {
+    let n_items = env_or("N_WITHOUT_DUPLICATES", 10_000);
+    generate_without_duplicates(n_items, 2048)
 });
 
-pub static DUPLICATES_STRING: Lazy<String> = Lazy::new(|| DUPLICATES.iter().join("\n"));
+pub static WITHOUT_DUPLICATES_STRING: Lazy<String> =
+    Lazy::new(|| WITHOUT_DUPLICATES.iter().join("\n"));
+
+pub static WITH_DUPLICATES: Lazy<Vec<String>> = Lazy::new(|| {
+    let n_items = env_or("N_WITH_DUPLICATES", 10_000);
+    generate_with_duplicates(n_items, 2048)
+});
+
+pub static WITH_DUPLICATES_STRING: Lazy<String> = Lazy::new(|| WITH_DUPLICATES.iter().join("\n"));

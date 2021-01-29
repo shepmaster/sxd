@@ -1,4 +1,6 @@
-use benchmarks::{alloc::TrackingAllocator, env_or, DUPLICATES_STRING, NO_DUPLICATES_STRING};
+use benchmarks::{
+    alloc::TrackingAllocator, env_or, WITHOUT_DUPLICATES_STRING, WITH_DUPLICATES_STRING,
+};
 use hashbrown::HashSet;
 use once_cell::sync::Lazy;
 use std::convert::TryFrom;
@@ -9,17 +11,17 @@ static A: TrackingAllocator = TrackingAllocator;
 
 fn main() {
     let show_map = env_or("SHOW_MAP", false);
-    Lazy::force(&NO_DUPLICATES_STRING);
-    Lazy::force(&DUPLICATES_STRING);
+    Lazy::force(&WITHOUT_DUPLICATES_STRING);
+    Lazy::force(&WITH_DUPLICATES_STRING);
 
-    let total_length: usize = DUPLICATES_STRING.lines().map(str::len).sum();
+    let total_length: usize = WITH_DUPLICATES_STRING.lines().map(str::len).sum();
     let total_length_f64 = f64::from(u32::try_from(total_length).unwrap());
 
     eprintln!("String data of {} bytes", total_length);
 
     let (_arena, alloc_size, alloc_count, alloc_map) = TrackingAllocator::track_allocations(|| {
         let mut arena = StringArena::new();
-        for s in DUPLICATES_STRING.lines() {
+        for s in WITH_DUPLICATES_STRING.lines() {
             arena.intern(s);
         }
         arena
@@ -36,7 +38,7 @@ fn main() {
 
     let (_arena, alloc_size, alloc_count, alloc_map) = TrackingAllocator::track_allocations(|| {
         let mut arena = HashSet::new();
-        for s in DUPLICATES_STRING.lines() {
+        for s in WITH_DUPLICATES_STRING.lines() {
             arena.get_or_insert_owned(s);
         }
         arena
