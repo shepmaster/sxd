@@ -1,0 +1,25 @@
+[package]
+name = "using-libfuzzer"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+comparison = { path = ".." }
+
+libfuzzer-sys = "0.3"
+
+[[bin]]
+name = "does_not_crash"
+path = "fuzz_targets/does_not_crash.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parses_what_libxml2_parses"
+path = "fuzz_targets/parses_what_libxml2_parses.rs"
+test = false
+doc = false

@@ -1,0 +1,10 @@
+[package]
+name = "using-afl"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[dependencies]
+comparison = { path = ".." }
+
+afl = "0.8.0"

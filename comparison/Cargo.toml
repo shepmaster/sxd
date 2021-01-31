@@ -1,0 +1,18 @@
+[package]
+name = "comparison"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[workspace]
+members = [
+    "using-afl",
+    "using-proptest",
+    "using-libfuzzer",
+]
+
+[dependencies]
+sxd-pull-parser = { path = ".." }
+libxml2-sys = { path = "libxml2-sys" }
+
+futures = "0.3.12"
