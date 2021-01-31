@@ -7,9 +7,35 @@ use itertools::Itertools;
 use snafu::{ensure, Snafu};
 use std::{mem, str};
 
-#[async_trait]
+#[async_trait(?Send)]
 trait DataSource {
     async fn read(&mut self, buffer: &mut [u8]) -> usize;
+}
+
+/// Adapts an implementer of [`std::io::Read`].
+///
+/// This should **not** be used unless you are also using the parser
+/// from a completely synchronous context.
+#[derive(Debug)]
+struct ReadAdapter<R>(R);
+
+impl<R> ReadAdapter<R>
+where
+    R: std::io::Read,
+{
+    fn new(read: R) -> Self {
+        Self(read)
+    }
+}
+
+#[async_trait(?Send)]
+impl<R> DataSource for ReadAdapter<R>
+where
+    R: std::io::Read,
+{
+    async fn read(&mut self, buffer: &mut [u8]) -> usize {
+        self.0.read(buffer).expect("TODO")
+    }
 }
 
 #[derive(Debug)]
@@ -273,9 +299,9 @@ impl<S> Parser<S>
 where
     S: DataSource,
 {
-    fn new(buffer: StringRing<S>) -> Self {
+    pub fn new(source: S) -> Self {
         Parser {
-            buffer,
+            buffer: StringRing::new(source),
             state: State::Initial,
             to_advance: 0,
         }
@@ -481,41 +507,10 @@ mod test {
         })
     }
 
-    impl Parser<CompleteSource> {
-        fn new_from_str(s: &str) -> Self {
-            let src = CompleteSource::new(s);
-            let buffer = StringRing::new(src);
-            Parser::new(buffer)
-        }
-    }
-
-    /// Always reads as much data as possible
-    struct CompleteSource {
-        data: Vec<u8>,
-        offset: usize,
-    }
-
-    impl CompleteSource {
-        fn new(data: impl Into<Vec<u8>>) -> Self {
-            Self {
-                data: data.into(),
-                offset: 0,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl DataSource for CompleteSource {
-        async fn read(&mut self, buffer: &mut [u8]) -> usize {
-            let remaining = &self.data[self.offset..];
-            let len = std::cmp::min(remaining.len(), buffer.len());
-
-            let remaining = &remaining[..len];
-            let buffer = &mut buffer[..len];
-
-            buffer.copy_from_slice(remaining);
-            self.offset += len;
-            len
+    impl<'a> Parser<ReadAdapter<&'a [u8]>> {
+        fn new_from_str(s: &'a str) -> Self {
+            let src = ReadAdapter::new(s.as_bytes());
+            Parser::new(src)
         }
     }
 
