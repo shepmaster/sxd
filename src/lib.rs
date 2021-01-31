@@ -68,12 +68,14 @@ where
         str::from_utf8(bytes).expect("Safety invariant failed")
     }
 
-    async fn extend(&mut self) {
+    async fn extend(&mut self) -> Result<()> {
         let buffer =
             &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][self.n_dangling_bytes..];
         assert_ne!(0, buffer.len(), "Need to extend buffer or shuffle data");
 
         let n_new_bytes = self.source.read(buffer).await;
+        ensure!(n_new_bytes > 0, NoMoreInputAvailable);
+
         self.n_dangling_bytes += n_new_bytes;
 
         let dangling_bytes =
@@ -88,28 +90,32 @@ where
 
         self.n_dangling_bytes -= n_new_utf8_bytes;
         self.n_utf8_bytes += n_new_utf8_bytes;
+
+        Ok(())
     }
 
-    async fn complete(&mut self) -> bool {
+    async fn complete(&mut self) -> Result<bool> {
         if !self.as_str().is_empty() {
-            return false;
+            return Ok(false);
         }
 
-        self.extend().await;
-
-        self.as_str().is_empty()
+        match self.extend().await {
+            Ok(()) => Ok(self.as_str().is_empty()),
+            Err(Error::NoMoreInputAvailable) => Ok(true),
+            Err(e) => Err(e),
+        }
     }
 
-    async fn starts_with(&mut self, needle: &str) -> bool {
+    async fn starts_with(&mut self, needle: &str) -> Result<bool> {
         let mut s = self.as_str();
 
         while s.len() < needle.len() {
             // TODO: Avoid infinite loop
-            self.extend().await;
+            self.extend().await?;
             s = self.as_str();
         }
 
-        s.starts_with(needle)
+        Ok(s.starts_with(needle))
     }
 
     fn advance(&mut self, n_bytes: usize) {
@@ -117,38 +123,38 @@ where
         self.n_utf8_bytes = self.n_utf8_bytes.saturating_sub(n_bytes);
     }
 
-    async fn consume(&mut self, s: &str) -> MustUse<bool> {
-        if self.starts_with(s).await {
+    async fn consume(&mut self, s: &str) -> Result<MustUse<bool>> {
+        if self.starts_with(s).await? {
             self.advance(s.len());
-            MustUse(true)
+            Ok(MustUse(true))
         } else {
-            MustUse(false)
+            Ok(MustUse(false))
         }
     }
 
     async fn require(&mut self, s: &str) -> Result<()> {
-        ensure!(*self.consume(s).await, RequiredTokenMissing { token: s });
+        ensure!(*self.consume(s).await?, RequiredTokenMissing { token: s });
         Ok(())
     }
 
-    async fn consume_until(&mut self, needle: &str) -> &str {
+    async fn consume_until(&mut self, needle: &str) -> Result<&str> {
         let mut s = self.as_str();
         if s.is_empty() {
-            self.extend().await;
+            self.extend().await?;
             s = self.as_str();
         }
 
         match s.find(needle) {
-            Some(x) => &self.as_str()[..x],
+            Some(x) => Ok(&self.as_str()[..x]),
             None => unimplemented!(),
         }
     }
 
-    async fn consume_space(&mut self) {
+    async fn consume_space(&mut self) -> Result<()> {
         let mut s = self.as_str();
 
         while s.is_empty() {
-            self.extend().await;
+            self.extend().await?;
             s = self.as_str();
             // TODO: Avoid infinite loop
         }
@@ -170,19 +176,21 @@ where
                         break;
                     }
 
-                    self.extend().await;
+                    self.extend().await?;
                     s = self.as_str();
                 }
                 None => break,
             }
         }
+
+        Ok(())
     }
 
-    async fn name(&mut self) -> &str {
+    async fn name(&mut self) -> Result<&str> {
         let mut s = self.as_str();
 
         while s.is_empty() {
-            self.extend().await;
+            self.extend().await?;
             s = self.as_str();
             // TODO: Avoid infinite loop
         }
@@ -204,7 +212,7 @@ where
             .last()
             .unwrap_or(end_idx);
 
-        &self.as_str()[..end_idx]
+        Ok(&self.as_str()[..end_idx])
     }
 }
 
@@ -310,16 +318,16 @@ where
     async fn dispatch_initial(&mut self) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
-        if self.buffer.complete().await {
+        if self.buffer.complete().await? {
             return Ok(None);
-        } else if *self.buffer.consume("</").await {
-            let name = self.buffer.name().await;
+        } else if *self.buffer.consume("</").await? {
+            let name = self.buffer.name().await?;
 
             self.state = AfterElementCloseName;
             self.to_advance = name.len();
             Ok(Some(ElementClose(name)))
-        } else if *self.buffer.consume("<").await {
-            let name = self.buffer.name().await;
+        } else if *self.buffer.consume("<").await? {
+            let name = self.buffer.name().await?;
 
             self.state = AfterElementOpenName;
             self.to_advance = name.len();
@@ -332,16 +340,16 @@ where
     async fn dispatch_after_element_open_name(&mut self) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space().await;
+        self.buffer.consume_space().await?;
 
-        if *self.buffer.consume("/>").await {
+        if *self.buffer.consume("/>").await? {
             self.state = Initial;
             Ok(Some(ElementSelfClose))
-        } else if *self.buffer.consume(">").await {
+        } else if *self.buffer.consume(">").await? {
             self.state = Initial;
             Ok(Some(ElementOpenEnd))
         } else {
-            let name = self.buffer.name().await;
+            let name = self.buffer.name().await?;
 
             self.state = AfterAttributeName;
             self.to_advance = name.len();
@@ -352,12 +360,12 @@ where
     async fn dispatch_after_attribute_name(&mut self) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space().await;
+        self.buffer.consume_space().await?;
         self.buffer.require("=").await?;
-        self.buffer.consume_space().await;
+        self.buffer.consume_space().await?;
 
         self.buffer.require("\"").await?;
-        let value = self.buffer.consume_until("\"").await;
+        let value = self.buffer.consume_until("\"").await?;
 
         self.state = AfterElementOpenName;
         self.to_advance = value.len() + 1; // Include the closing quote
@@ -365,7 +373,7 @@ where
     }
 
     async fn dispatch_after_element_close_name(&mut self) -> Result<Option<Token<'_>>> {
-        self.buffer.consume_space().await;
+        self.buffer.consume_space().await?;
         self.buffer.require(">").await?;
 
         self.dispatch_initial().await
@@ -415,6 +423,8 @@ impl<T> std::ops::DerefMut for MustUse<T> {
 
 #[derive(Debug, Snafu)]
 pub enum Error {
+    NoMoreInputAvailable,
+
     RequiredTokenMissing { token: String },
 }
 
@@ -507,6 +517,17 @@ mod test {
         })
     }
 
+    #[test]
+    fn fail_one_character() -> Result {
+        block_on(async {
+            let error = Parser::new_from_str(r#"a"#).collect_owned().await;
+
+            assert!(matches!(error, Err(Error::NoMoreInputAvailable)));
+
+            Ok(())
+        })
+    }
+
     impl<'a> Parser<ReadAdapter<&'a [u8]>> {
         fn new_from_str(s: &'a str) -> Self {
             let src = ReadAdapter::new(s.as_bytes());
@@ -565,7 +586,7 @@ mod test {
     where
         Self: TokenSource,
     {
-        async fn collect_owned(&mut self) -> Result<Vec<OwnedToken>> {
+        async fn collect_owned(&mut self) -> super::Result<Vec<OwnedToken>> {
             let mut v = vec![];
             while let Some(t) = self.next().await {
                 v.push(t?.into());

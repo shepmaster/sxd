@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use comparison::libxml2_sys;
 use proptest::prelude::*;
 
 proptest! {
