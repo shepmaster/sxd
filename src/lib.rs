@@ -458,6 +458,29 @@ mod test {
         })
     }
 
+    #[test]
+    fn element_with_one_child() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str(r#"<alpha><beta /></alpha>"#)
+                .collect_owned()
+                .await?;
+
+            use Token::*;
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart("alpha"),
+                    ElementOpenEnd,
+                    ElementOpenStart("beta"),
+                    ElementSelfClose,
+                    ElementClose("alpha"),
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
     impl Parser<CompleteSource> {
         fn new_from_str(s: &str) -> Self {
             let src = CompleteSource::new(s);
