@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use easy_ext::ext;
 use itertools::Itertools;
-use snafu::Snafu;
+use snafu::{ensure, Snafu};
 use std::{mem, str};
 
 #[async_trait]
@@ -91,14 +91,18 @@ where
         self.n_utf8_bytes = self.n_utf8_bytes.saturating_sub(n_bytes);
     }
 
-    // TODO: #[must_use]
-    async fn consume(&mut self, s: &str) -> bool {
+    async fn consume(&mut self, s: &str) -> MustUse<bool> {
         if self.starts_with(s).await {
             self.advance(s.len());
-            true
+            MustUse(true)
         } else {
-            false
+            MustUse(false)
         }
+    }
+
+    async fn require(&mut self, s: &str) -> Result<()> {
+        ensure!(*self.consume(s).await, RequiredTokenMissing { token: s });
+        Ok(())
     }
 
     async fn consume_until(&mut self, needle: &str) -> &str {
@@ -277,26 +281,68 @@ where
         }
     }
 
-    async fn dispatch_initial(&mut self) -> Option<Result<Token<'_>>> {
+    async fn dispatch_initial(&mut self) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
         if self.buffer.complete().await {
-            return None;
-        } else if self.buffer.consume("</").await {
+            return Ok(None);
+        } else if *self.buffer.consume("</").await {
             let name = self.buffer.name().await;
 
             self.state = AfterElementCloseName;
             self.to_advance = name.len();
-            Some(Ok(ElementClose(name)))
-        } else if self.buffer.consume("<").await {
+            Ok(Some(ElementClose(name)))
+        } else if *self.buffer.consume("<").await {
             let name = self.buffer.name().await;
 
             self.state = AfterElementOpenName;
             self.to_advance = name.len();
-            Some(Ok(ElementOpenStart(name)))
+            Ok(Some(ElementOpenStart(name)))
         } else {
             unimplemented!()
         }
+    }
+
+    async fn dispatch_after_element_open_name(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        self.buffer.consume_space().await;
+
+        if *self.buffer.consume("/>").await {
+            self.state = Initial;
+            Ok(Some(ElementSelfClose))
+        } else if *self.buffer.consume(">").await {
+            self.state = Initial;
+            Ok(Some(ElementOpenEnd))
+        } else {
+            let name = self.buffer.name().await;
+
+            self.state = AfterAttributeName;
+            self.to_advance = name.len();
+            Ok(Some(AttributeName(name)))
+        }
+    }
+
+    async fn dispatch_after_attribute_name(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        self.buffer.consume_space().await;
+        self.buffer.require("=").await?;
+        self.buffer.consume_space().await;
+
+        self.buffer.require("\"").await?;
+        let value = self.buffer.consume_until("\"").await;
+
+        self.state = AfterElementOpenName;
+        self.to_advance = value.len() + 1; // Include the closing quote
+        Ok(Some(AttributeValue(value)))
+    }
+
+    async fn dispatch_after_element_close_name(&mut self) -> Result<Option<Token<'_>>> {
+        self.buffer.consume_space().await;
+        self.buffer.require(">").await?;
+
+        self.dispatch_initial().await
     }
 }
 
@@ -306,59 +352,45 @@ where
     S: DataSource,
 {
     async fn next(&mut self) -> Option<Result<Token<'_>>> {
-        use {State::*, Token::*};
+        use State::*;
 
         let to_advance = mem::take(&mut self.to_advance);
         self.buffer.advance(to_advance);
 
         match self.state {
             Initial => self.dispatch_initial().await,
-
-            AfterElementOpenName => {
-                self.buffer.consume_space().await;
-
-                if self.buffer.consume("/>").await {
-                    self.state = Initial;
-                    Some(Ok(ElementSelfClose))
-                } else if self.buffer.consume(">").await {
-                    self.state = Initial;
-                    Some(Ok(ElementOpenEnd))
-                } else {
-                    let name = self.buffer.name().await;
-
-                    self.state = AfterAttributeName;
-                    self.to_advance = name.len();
-                    Some(Ok(AttributeName(name)))
-                }
-            }
-
-            AfterAttributeName => {
-                self.buffer.consume_space().await;
-                self.buffer.consume("=").await;
-                self.buffer.consume_space().await;
-
-                self.buffer.consume("\"").await;
-                let value = self.buffer.consume_until("\"").await;
-
-                self.state = AfterElementOpenName;
-                self.to_advance = value.len() + 1; // Include the closing quote
-                Some(Ok(AttributeValue(value)))
-            }
-
-            AfterElementCloseName => {
-                self.buffer.consume_space().await;
-                self.buffer.consume(">").await;
-
-                self.dispatch_initial().await
-            }
+            AfterElementOpenName => self.dispatch_after_element_open_name().await,
+            AfterAttributeName => self.dispatch_after_attribute_name().await,
+            AfterElementCloseName => self.dispatch_after_element_close_name().await,
 
             s => unimplemented!("state: {:?}", s),
         }
+        .transpose()
+    }
+}
+
+// https://github.com/rust-lang/rust/issues/78149
+#[must_use]
+struct MustUse<T>(T);
+
+impl<T> std::ops::Deref for MustUse<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for MustUse<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
     }
 }
 
 #[derive(Debug, Snafu)]
-enum Error {}
+enum Error {
+    RequiredTokenMissing { token: String },
+}
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
