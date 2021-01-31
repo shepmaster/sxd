@@ -91,6 +91,7 @@ where
         self.n_utf8_bytes = self.n_utf8_bytes.saturating_sub(n_bytes);
     }
 
+    // TODO: #[must_use]
     async fn consume(&mut self, s: &str) -> bool {
         if self.starts_with(s).await {
             self.advance(s.len());
@@ -228,18 +229,27 @@ impl char {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum State {
     Initial,
-    AfterElementName,
+    AfterElementOpenName,
     AfterAttributeName,
     AfterAttributeValue,
-    AfterElementClosed,
+    AfterElementCloseName,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Token<'a> {
-    ElementStart(&'a str),
+    /// `<foo`
+    ElementOpenStart(&'a str),
+    /// `>`
+    ElementOpenEnd,
+    /// `/>`
     ElementSelfClose,
 
+    /// `</foo`
+    ElementClose(&'a str),
+
+    /// `foo`
     AttributeName(&'a str),
+    /// `="bar`
     AttributeValue(&'a str),
 }
 
@@ -255,12 +265,37 @@ struct Parser<S> {
     to_advance: usize,
 }
 
-impl<S> Parser<S> {
+impl<S> Parser<S>
+where
+    S: DataSource,
+{
     fn new(buffer: StringRing<S>) -> Self {
         Parser {
             buffer,
             state: State::Initial,
             to_advance: 0,
+        }
+    }
+
+    async fn dispatch_initial(&mut self) -> Option<Result<Token<'_>>> {
+        use {State::*, Token::*};
+
+        if self.buffer.complete().await {
+            return None;
+        } else if self.buffer.consume("</").await {
+            let name = self.buffer.name().await;
+
+            self.state = AfterElementCloseName;
+            self.to_advance = name.len();
+            Some(Ok(ElementClose(name)))
+        } else if self.buffer.consume("<").await {
+            let name = self.buffer.name().await;
+
+            self.state = AfterElementOpenName;
+            self.to_advance = name.len();
+            Some(Ok(ElementOpenStart(name)))
+        } else {
+            unimplemented!()
         }
     }
 }
@@ -277,25 +312,17 @@ where
         self.buffer.advance(to_advance);
 
         match self.state {
-            Initial => {
-                if self.buffer.consume("<").await {
-                    // space?
-                    let name = self.buffer.name().await;
+            Initial => self.dispatch_initial().await,
 
-                    self.state = AfterElementName;
-                    self.to_advance = name.len();
-                    Some(Ok(ElementStart(name)))
-                } else {
-                    panic!()
-                }
-            }
-
-            AfterElementName => {
+            AfterElementOpenName => {
                 self.buffer.consume_space().await;
 
                 if self.buffer.consume("/>").await {
-                    self.state = AfterElementClosed;
+                    self.state = Initial;
                     Some(Ok(ElementSelfClose))
+                } else if self.buffer.consume(">").await {
+                    self.state = Initial;
+                    Some(Ok(ElementOpenEnd))
                 } else {
                     let name = self.buffer.name().await;
 
@@ -313,17 +340,16 @@ where
                 self.buffer.consume("\"").await;
                 let value = self.buffer.consume_until("\"").await;
 
-                self.state = AfterElementName;
+                self.state = AfterElementOpenName;
                 self.to_advance = value.len() + 1; // Include the closing quote
                 Some(Ok(AttributeValue(value)))
             }
 
-            AfterElementClosed => {
-                if self.buffer.complete().await {
-                    return None;
-                }
+            AfterElementCloseName => {
+                self.buffer.consume_space().await;
+                self.buffer.consume(">").await;
 
-                unimplemented!()
+                self.dispatch_initial().await
             }
 
             s => unimplemented!("state: {:?}", s),
@@ -351,7 +377,7 @@ mod test {
             let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned().await?;
 
             use Token::*;
-            assert_eq!(tokens, [ElementStart("alpha"), ElementSelfClose]);
+            assert_eq!(tokens, [ElementOpenStart("alpha"), ElementSelfClose]);
 
             Ok(())
         })
@@ -368,10 +394,31 @@ mod test {
             assert_eq!(
                 tokens,
                 [
-                    ElementStart("alpha"),
+                    ElementOpenStart("alpha"),
                     AttributeName("a"),
                     AttributeValue("b"),
                     ElementSelfClose,
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn element_with_no_children() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str(r#"<alpha></alpha>"#)
+                .collect_owned()
+                .await?;
+
+            use Token::*;
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart("alpha"),
+                    ElementOpenEnd,
+                    ElementClose("alpha"),
                 ],
             );
 
@@ -420,8 +467,12 @@ mod test {
     /// Owns all the string data to avoid keeping references alive
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum OwnedToken {
-        ElementStart(String),
+        ElementOpenStart(String),
+        ElementOpenEnd,
         ElementSelfClose,
+
+        ElementClose(String),
+
         AttributeName(String),
         AttributeValue(String),
     }
@@ -429,8 +480,12 @@ mod test {
     impl From<Token<'_>> for OwnedToken {
         fn from(other: Token<'_>) -> Self {
             match other {
-                Token::ElementStart(s) => Self::ElementStart(s.to_owned()),
+                Token::ElementOpenStart(s) => Self::ElementOpenStart(s.to_owned()),
+                Token::ElementOpenEnd => Self::ElementOpenEnd,
                 Token::ElementSelfClose => Self::ElementSelfClose,
+
+                Token::ElementClose(s) => Self::ElementClose(s.to_owned()),
+
                 Token::AttributeName(s) => Self::AttributeName(s.to_owned()),
                 Token::AttributeValue(s) => Self::AttributeValue(s.to_owned()),
             }
@@ -440,8 +495,12 @@ mod test {
     impl PartialEq<Token<'_>> for OwnedToken {
         fn eq(&self, other: &Token<'_>) -> bool {
             match (self, other) {
-                (Self::ElementStart(s1), Token::ElementStart(s2)) => s1 == s2,
+                (Self::ElementOpenStart(s1), Token::ElementOpenStart(s2)) => s1 == s2,
+                (Self::ElementOpenEnd, Token::ElementOpenEnd) => true,
                 (Self::ElementSelfClose, Token::ElementSelfClose) => true,
+
+                (Self::ElementClose(s1), Token::ElementClose(s2)) => s1 == s2,
+
                 (Self::AttributeName(s1), Token::AttributeName(s2)) => s1 == s2,
                 (Self::AttributeValue(s1), Token::AttributeValue(s2)) => s1 == s2,
 
