@@ -26,6 +26,16 @@ impl<S> StringRing<S>
 where
     S: DataSource,
 {
+    fn new(source: S) -> Self {
+        Self {
+            buffer: vec![0; 1024],
+            source,
+            n_offset_bytes: 0,
+            n_utf8_bytes: 0,
+            n_dangling_bytes: 0,
+        }
+    }
+
     fn as_str(&self) -> &str {
         // TODO: Alternate implementation without checks
         let bytes = &self.buffer[self.n_offset_bytes..][..self.n_utf8_bytes];
@@ -245,6 +255,16 @@ struct Parser<S> {
     to_advance: usize,
 }
 
+impl<S> Parser<S> {
+    fn new(buffer: StringRing<S>) -> Self {
+        Parser {
+            buffer,
+            state: State::Initial,
+            to_advance: 0,
+        }
+    }
+}
+
 #[async_trait(?Send)]
 impl<S> TokenSource for Parser<S>
 where
@@ -293,8 +313,8 @@ where
                 self.buffer.consume("\"").await;
                 let value = self.buffer.consume_until("\"").await;
 
-                self.state = AfterAttributeValue;
-                self.to_advance = value.len();
+                self.state = AfterElementName;
+                self.to_advance = value.len() + 1; // Include the closing quote
                 Some(Ok(AttributeValue(value)))
             }
 
@@ -328,24 +348,7 @@ mod test {
     #[test]
     fn self_closed_element() -> Result {
         block_on(async {
-            let src = CompleteSource {
-                data: b"<alpha />".to_vec(),
-                offset: 0,
-            };
-            let buffer = StringRing {
-                buffer: vec![0; 1024],
-                source: src,
-                n_offset_bytes: 0,
-                n_utf8_bytes: 0,
-                n_dangling_bytes: 0,
-            };
-            let mut parser = Parser {
-                buffer,
-                state: State::Initial,
-                to_advance: 0,
-            };
-
-            let tokens = parser.collect_owned().await?;
+            let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned().await?;
 
             use Token::*;
             assert_eq!(tokens, [ElementStart("alpha"), ElementSelfClose]);
@@ -354,10 +357,49 @@ mod test {
         })
     }
 
+    #[test]
+    fn self_closed_element_with_one_attribute() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str(r#"<alpha a="b"/>"#)
+                .collect_owned()
+                .await?;
+
+            use Token::*;
+            assert_eq!(
+                tokens,
+                [
+                    ElementStart("alpha"),
+                    AttributeName("a"),
+                    AttributeValue("b"),
+                    ElementSelfClose,
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    impl Parser<CompleteSource> {
+        fn new_from_str(s: &str) -> Self {
+            let src = CompleteSource::new(s);
+            let buffer = StringRing::new(src);
+            Parser::new(buffer)
+        }
+    }
+
     /// Always reads as much data as possible
     struct CompleteSource {
         data: Vec<u8>,
         offset: usize,
+    }
+
+    impl CompleteSource {
+        fn new(data: impl Into<Vec<u8>>) -> Self {
+            Self {
+                data: data.into(),
+                offset: 0,
+            }
+        }
     }
 
     #[async_trait]
@@ -400,6 +442,9 @@ mod test {
             match (self, other) {
                 (Self::ElementStart(s1), Token::ElementStart(s2)) => s1 == s2,
                 (Self::ElementSelfClose, Token::ElementSelfClose) => true,
+                (Self::AttributeName(s1), Token::AttributeName(s2)) => s1 == s2,
+                (Self::AttributeValue(s1), Token::AttributeValue(s2)) => s1 == s2,
+
                 _ => false,
             }
         }
