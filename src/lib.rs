@@ -150,7 +150,7 @@ where
         }
     }
 
-    async fn consume_space(&mut self) -> Result<()> {
+    async fn space(&mut self) -> Result<Option<usize>> {
         let mut s = self.as_str();
 
         while s.is_empty() {
@@ -159,28 +159,22 @@ where
             // TODO: Avoid infinite loop
         }
 
-        loop {
-            let space = s
-                .char_indices()
-                .peeking_take_while(|(_, c)| c.is_space())
-                .last()
-                .map(|(i, c)| i + c.len_utf8());
+        let space = s
+            .char_indices()
+            .peeking_take_while(|(_, c)| c.is_space())
+            .last()
+            .map(|(i, c)| i + c.len_utf8());
 
-            match space {
-                Some(l) => {
-                    let is_entire_string = l == s.len();
+        match space {
+            Some(0) => Ok(None),
+            Some(space) => Ok(Some(space)),
+            None => Ok(None),
+        }
+    }
 
-                    self.advance(l);
-
-                    if !is_entire_string {
-                        break;
-                    }
-
-                    self.extend().await?;
-                    s = self.as_str();
-                }
-                None => break,
-            }
+    async fn consume_space(&mut self) -> Result<()> {
+        while let Some(len) = self.space().await? {
+            self.advance(len);
         }
 
         Ok(())
@@ -289,6 +283,8 @@ pub enum Token<'a> {
     AttributeName(&'a str),
     /// `="bar`
     AttributeValue(&'a str),
+
+    Space(&'a str),
 }
 
 #[async_trait(?Send)]
@@ -319,7 +315,10 @@ where
         use {State::*, Token::*};
 
         if self.buffer.complete().await? {
-            return Ok(None);
+            Ok(None)
+        } else if let Some(l) = self.buffer.space().await? {
+            self.to_advance = l;
+            Ok(Some(Space(&self.buffer.as_str()[..l])))
         } else if *self.buffer.consume("</").await? {
             let name = self.buffer.name().await?;
 
@@ -518,6 +517,38 @@ mod test {
     }
 
     #[test]
+    fn only_space() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str(" \t\r\n").collect_owned().await?;
+
+            use Token::*;
+            assert_eq!(tokens, [Space(" \t\r\n")]);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn leading_and_trailing_whitespace() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned().await?;
+
+            use Token::*;
+            assert_eq!(
+                tokens,
+                [
+                    Space("\t "),
+                    ElementOpenStart("a"),
+                    ElementSelfClose,
+                    Space("\r\n"),
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
     fn fail_one_character() -> Result {
         block_on(async {
             let error = Parser::new_from_str(r#"a"#).collect_owned().await;
@@ -546,6 +577,8 @@ mod test {
 
         AttributeName(String),
         AttributeValue(String),
+
+        Space(String),
     }
 
     impl From<Token<'_>> for OwnedToken {
@@ -559,6 +592,8 @@ mod test {
 
                 Token::AttributeName(s) => Self::AttributeName(s.to_owned()),
                 Token::AttributeValue(s) => Self::AttributeValue(s.to_owned()),
+
+                Token::Space(s) => Self::Space(s.to_owned()),
             }
         }
     }
@@ -574,6 +609,8 @@ mod test {
 
                 (Self::AttributeName(s1), Token::AttributeName(s2)) => s1 == s2,
                 (Self::AttributeValue(s1), Token::AttributeValue(s2)) => s1 == s2,
+
+                (Self::Space(s1), Token::Space(s2)) => s1 == s2,
 
                 _ => false,
             }
