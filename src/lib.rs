@@ -637,6 +637,17 @@ mod test {
 
     type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+    macro_rules! assert_error {
+        ($e:expr, $p:pat) => {
+            assert!(
+                matches!($e, Err($p)),
+                "Expected {}, but got {:?}",
+                stringify!($p),
+                $e
+            )
+        };
+    }
+
     #[test]
     fn self_closed_element() -> Result {
         block_on(async {
@@ -857,7 +868,7 @@ mod test {
         block_on(async {
             let error = Parser::new_from_str(r#"a"#).collect_owned().await;
 
-            assert!(matches!(error, Err(Error::NoMoreInputAvailable)));
+            assert_error!(error, Error::NoMoreInputAvailable);
 
             Ok(())
         })
