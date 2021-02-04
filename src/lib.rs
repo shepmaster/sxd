@@ -52,9 +52,21 @@ impl<S> StringRing<S>
 where
     S: DataSource,
 {
+    const MINIMUM_CAPACITY: usize = 2;
+    const DEFAULT_CAPACITY: usize = 1024;
+
     fn new(source: S) -> Self {
+        Self::with_buffer_capacity(source, Self::DEFAULT_CAPACITY)
+    }
+
+    fn with_buffer_capacity(source: S, capacity: usize) -> Self {
+        assert!(
+            capacity >= Self::MINIMUM_CAPACITY,
+            "The capacity must be large enough to match minimum token lengths",
+        );
+
         Self {
-            buffer: vec![0; 1024],
+            buffer: vec![0; capacity],
             source,
             n_offset_bytes: 0,
             n_utf8_bytes: 0,
@@ -69,9 +81,22 @@ where
     }
 
     async fn extend(&mut self) -> Result<()> {
-        let buffer =
+        let mut buffer =
             &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][self.n_dangling_bytes..];
-        assert_ne!(0, buffer.len(), "Need to extend buffer or shuffle data");
+
+        if buffer.is_empty() {
+            let s = self.n_offset_bytes;
+            let e = s + self.n_utf8_bytes + self.n_dangling_bytes;
+            self.buffer.copy_within(s..e, 0);
+            self.n_offset_bytes = 0;
+
+            buffer = &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..]
+                [self.n_dangling_bytes..];
+        }
+        assert!(
+            !buffer.is_empty(),
+            "No room left to store data in buffer; buffer too small",
+        );
 
         let n_new_bytes = self.source.read(buffer).await;
         ensure!(n_new_bytes > 0, NoMoreInputAvailable);
@@ -137,7 +162,7 @@ where
         Ok(())
     }
 
-    async fn consume_until(&mut self, needle: &str) -> Result<&str> {
+    async fn consume_until(&mut self, needle: &str) -> Result<Streaming<&str>> {
         let mut s = self.as_str();
         if s.is_empty() {
             self.extend().await?;
@@ -145,8 +170,8 @@ where
         }
 
         match s.find(needle) {
-            Some(x) => Ok(&self.as_str()[..x]),
-            None => unimplemented!(),
+            Some(x) => Ok(Streaming::Complete(&self.as_str()[..x])),
+            None => Ok(Streaming::Partial(self.as_str())),
         }
     }
 
@@ -180,7 +205,7 @@ where
         Ok(())
     }
 
-    async fn name(&mut self) -> Result<&str> {
+    async fn name(&mut self) -> Result<Streaming<&str>> {
         let mut s = self.as_str();
 
         while s.is_empty() {
@@ -197,7 +222,7 @@ where
             .map(|(i, c)| i + c.len_utf8())
         {
             Some(i) => i,
-            None => panic!("empty string"),
+            None => return Ok(Streaming::Complete("")),
         };
 
         let end_idx = c
@@ -206,7 +231,12 @@ where
             .last()
             .unwrap_or(end_idx);
 
-        Ok(&self.as_str()[..end_idx])
+        let s = self.as_str();
+        if end_idx == s.len() {
+            Ok(Streaming::Partial(s))
+        } else {
+            Ok(Streaming::Complete(&s[..end_idx]))
+        }
     }
 }
 
@@ -261,30 +291,80 @@ impl char {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum State {
     Initial,
+
+    StreamElementOpenName,
     AfterElementOpenName,
+
+    StreamAttributeName,
     AfterAttributeName,
-    AfterAttributeValue,
+    StreamAttributeValue,
+
+    StreamElementCloseName,
     AfterElementCloseName,
+}
+
+#[derive(Debug, Copy, Clone, Eq)]
+pub enum Streaming<T> {
+    Partial(T),
+    Complete(T),
+}
+
+impl<T> Streaming<T> {
+    fn is_complete(&self) -> bool {
+        matches!(self, Streaming::Complete(_))
+    }
+
+    fn unify(&self) -> &T {
+        match self {
+            Self::Partial(a) => a,
+            Self::Complete(a) => a,
+        }
+    }
+}
+
+impl<T> Streaming<&T>
+where
+    T: ToOwned + ?Sized,
+{
+    fn into_owned(self) -> Streaming<T::Owned> {
+        match self {
+            Streaming::Partial(v) => Streaming::Partial(v.to_owned()),
+            Streaming::Complete(v) => Streaming::Complete(v.to_owned()),
+        }
+    }
+}
+
+impl<T, U> PartialEq<Streaming<U>> for Streaming<T>
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &Streaming<U>) -> bool {
+        match (self, other) {
+            (Streaming::Partial(a), Streaming::Partial(b)) => a == b,
+            (Streaming::Complete(a), Streaming::Complete(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Token<'a> {
     /// `<foo`
-    ElementOpenStart(&'a str),
+    ElementOpenStart(Streaming<&'a str>),
     /// `>`
     ElementOpenEnd,
     /// `/>`
     ElementSelfClose,
 
     /// `</foo`
-    ElementClose(&'a str),
+    ElementClose(Streaming<&'a str>),
 
     /// `foo`
-    AttributeName(&'a str),
+    AttributeName(Streaming<&'a str>),
     /// `="bar`
-    AttributeValue(&'a str),
+    AttributeValue(Streaming<&'a str>),
 
-    Space(&'a str),
+    Space(Streaming<&'a str>),
 }
 
 #[async_trait(?Send)]
@@ -304,8 +384,12 @@ where
     S: DataSource,
 {
     pub fn new(source: S) -> Self {
+        Self::with_buffer_capacity(source, StringRing::<S>::DEFAULT_CAPACITY)
+    }
+
+    fn with_buffer_capacity(source: S, capacity: usize) -> Self {
         Parser {
-            buffer: StringRing::new(source),
+            buffer: StringRing::with_buffer_capacity(source, capacity),
             state: State::Initial,
             to_advance: 0,
         }
@@ -318,22 +402,26 @@ where
             Ok(None)
         } else if let Some(l) = self.buffer.space().await? {
             self.to_advance = l;
-            Ok(Some(Space(&self.buffer.as_str()[..l])))
+            Ok(Some(Space(Streaming::Complete(&self.buffer.as_str()[..l]))))
         } else if *self.buffer.consume("</").await? {
-            let name = self.buffer.name().await?;
-
-            self.state = AfterElementCloseName;
-            self.to_advance = name.len();
-            Ok(Some(ElementClose(name)))
+            self.state = StreamElementCloseName;
+            self.dispatch_stream_element_close_name().await
         } else if *self.buffer.consume("<").await? {
-            let name = self.buffer.name().await?;
-
-            self.state = AfterElementOpenName;
-            self.to_advance = name.len();
-            Ok(Some(ElementOpenStart(name)))
+            self.state = StreamElementOpenName;
+            self.dispatch_stream_element_open_name().await
         } else {
             unimplemented!()
         }
+    }
+
+    async fn dispatch_stream_element_open_name(&mut self) -> Result<Option<Token<'_>>> {
+        self.stream_name(State::AfterElementOpenName, Token::ElementOpenStart)
+            .await
+    }
+
+    async fn dispatch_stream_element_close_name(&mut self) -> Result<Option<Token<'_>>> {
+        self.stream_name(State::AfterElementCloseName, Token::ElementClose)
+            .await
     }
 
     async fn dispatch_after_element_open_name(&mut self) -> Result<Option<Token<'_>>> {
@@ -348,26 +436,41 @@ where
             self.state = Initial;
             Ok(Some(ElementOpenEnd))
         } else {
-            let name = self.buffer.name().await?;
-
-            self.state = AfterAttributeName;
-            self.to_advance = name.len();
-            Ok(Some(AttributeName(name)))
+            self.state = StreamAttributeName;
+            self.dispatch_stream_attribute_name().await
         }
     }
 
+    async fn dispatch_stream_attribute_name(&mut self) -> Result<Option<Token<'_>>> {
+        self.stream_name(State::AfterAttributeName, Token::AttributeName)
+            .await
+    }
+
     async fn dispatch_after_attribute_name(&mut self) -> Result<Option<Token<'_>>> {
-        use {State::*, Token::*};
+        use State::*;
 
         self.buffer.consume_space().await?;
         self.buffer.require("=").await?;
         self.buffer.consume_space().await?;
 
         self.buffer.require("\"").await?;
+
+        self.state = StreamAttributeValue;
+        self.dispatch_stream_attribute_value().await
+    }
+
+    async fn dispatch_stream_attribute_value(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
         let value = self.buffer.consume_until("\"").await?;
 
-        self.state = AfterElementOpenName;
-        self.to_advance = value.len() + 1; // Include the closing quote
+        self.to_advance = value.unify().len();
+
+        if value.is_complete() {
+            self.state = AfterElementOpenName;
+            self.to_advance += 1 // Include the closing quote
+        }
+
         Ok(Some(AttributeValue(value)))
     }
 
@@ -376,6 +479,23 @@ where
         self.buffer.require(">").await?;
 
         self.dispatch_initial().await
+    }
+
+    // ----------
+
+    async fn stream_name<'a>(
+        &'a mut self,
+        next_state: State,
+        create: impl FnOnce(Streaming<&'a str>) -> Token<'a>,
+    ) -> Result<Option<Token<'_>>> {
+        let name = self.buffer.name().await?;
+
+        self.to_advance = name.unify().len();
+
+        if name.is_complete() {
+            self.state = next_state;
+        }
+        Ok(Some(create(name)))
     }
 }
 
@@ -392,11 +512,16 @@ where
 
         match self.state {
             Initial => self.dispatch_initial().await,
-            AfterElementOpenName => self.dispatch_after_element_open_name().await,
-            AfterAttributeName => self.dispatch_after_attribute_name().await,
-            AfterElementCloseName => self.dispatch_after_element_close_name().await,
 
-            s => unimplemented!("state: {:?}", s),
+            StreamElementOpenName => self.dispatch_stream_element_open_name().await,
+            AfterElementOpenName => self.dispatch_after_element_open_name().await,
+
+            StreamAttributeName => self.dispatch_stream_attribute_name().await,
+            AfterAttributeName => self.dispatch_after_attribute_name().await,
+            StreamAttributeValue => self.dispatch_stream_attribute_value().await,
+
+            StreamElementCloseName => self.dispatch_stream_element_close_name().await,
+            AfterElementCloseName => self.dispatch_after_element_close_name().await,
         }
         .transpose()
     }
@@ -443,8 +568,34 @@ mod test {
         block_on(async {
             let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned().await?;
 
-            use Token::*;
-            assert_eq!(tokens, [ElementOpenStart("alpha"), ElementSelfClose]);
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [ElementOpenStart(Complete("alpha")), ElementSelfClose]
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn self_closed_element_small_capacity() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_min_capacity(r#"<alpha />"#)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Partial("a")),
+                    ElementOpenStart(Partial("lp")),
+                    ElementOpenStart(Partial("ha")),
+                    ElementOpenStart(Complete("")),
+                    ElementSelfClose,
+                ]
+            );
 
             Ok(())
         })
@@ -457,13 +608,42 @@ mod test {
                 .collect_owned()
                 .await?;
 
-            use Token::*;
+            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart("alpha"),
-                    AttributeName("a"),
-                    AttributeValue("b"),
+                    ElementOpenStart(Complete("alpha")),
+                    AttributeName(Complete("a")),
+                    AttributeValue(Complete("b")),
+                    ElementSelfClose,
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn self_closed_element_with_one_attribute_small_capacity() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_min_capacity(r#"<alpha beta="gamma"/>"#)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Partial("a")),
+                    ElementOpenStart(Partial("lp")),
+                    ElementOpenStart(Partial("ha")),
+                    ElementOpenStart(Complete("")),
+                    AttributeName(Partial("be")),
+                    AttributeName(Partial("ta")),
+                    AttributeName(Complete("")),
+                    AttributeValue(Partial("ga")),
+                    AttributeValue(Partial("mm")),
+                    AttributeValue(Complete("a")),
                     ElementSelfClose,
                 ],
             );
@@ -479,13 +659,39 @@ mod test {
                 .collect_owned()
                 .await?;
 
-            use Token::*;
+            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart("alpha"),
+                    ElementOpenStart(Complete("alpha")),
                     ElementOpenEnd,
-                    ElementClose("alpha"),
+                    ElementClose(Complete("alpha")),
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn element_with_no_children_small_capacity() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_min_capacity(r#"<alpha></alpha>"#)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Partial("a")),
+                    ElementOpenStart(Partial("lp")),
+                    ElementOpenStart(Partial("ha")),
+                    ElementOpenStart(Complete("")),
+                    ElementOpenEnd,
+                    ElementClose(Partial("al")),
+                    ElementClose(Partial("ph")),
+                    ElementClose(Complete("a")),
                 ],
             );
 
@@ -500,15 +706,15 @@ mod test {
                 .collect_owned()
                 .await?;
 
-            use Token::*;
+            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart("alpha"),
+                    ElementOpenStart(Complete("alpha")),
                     ElementOpenEnd,
-                    ElementOpenStart("beta"),
+                    ElementOpenStart(Complete("beta")),
                     ElementSelfClose,
-                    ElementClose("alpha"),
+                    ElementClose(Complete("alpha")),
                 ],
             );
 
@@ -521,8 +727,8 @@ mod test {
         block_on(async {
             let tokens = Parser::new_from_str(" \t\r\n").collect_owned().await?;
 
-            use Token::*;
-            assert_eq!(tokens, [Space(" \t\r\n")]);
+            use {Streaming::*, Token::*};
+            assert_eq!(tokens, [Space(Complete(" \t\r\n"))]);
 
             Ok(())
         })
@@ -533,14 +739,14 @@ mod test {
         block_on(async {
             let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned().await?;
 
-            use Token::*;
+            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
-                    Space("\t "),
-                    ElementOpenStart("a"),
+                    Space(Complete("\t ")),
+                    ElementOpenStart(Complete("a")),
                     ElementSelfClose,
-                    Space("\r\n"),
+                    Space(Complete("\r\n")),
                 ],
             );
 
@@ -561,39 +767,47 @@ mod test {
 
     impl<'a> Parser<ReadAdapter<&'a [u8]>> {
         fn new_from_str(s: &'a str) -> Self {
+            Self::new_from_str_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::DEFAULT_CAPACITY)
+        }
+
+        fn new_from_str_and_min_capacity(s: &'a str) -> Self {
+            Self::new_from_str_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::MINIMUM_CAPACITY)
+        }
+
+        fn new_from_str_and_capacity(s: &'a str, capacity: usize) -> Self {
             let src = ReadAdapter::new(s.as_bytes());
-            Parser::new(src)
+            Parser::with_buffer_capacity(src, capacity)
         }
     }
 
     /// Owns all the string data to avoid keeping references alive
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum OwnedToken {
-        ElementOpenStart(String),
+        ElementOpenStart(Streaming<String>),
         ElementOpenEnd,
         ElementSelfClose,
 
-        ElementClose(String),
+        ElementClose(Streaming<String>),
 
-        AttributeName(String),
-        AttributeValue(String),
+        AttributeName(Streaming<String>),
+        AttributeValue(Streaming<String>),
 
-        Space(String),
+        Space(Streaming<String>),
     }
 
     impl From<Token<'_>> for OwnedToken {
         fn from(other: Token<'_>) -> Self {
             match other {
-                Token::ElementOpenStart(s) => Self::ElementOpenStart(s.to_owned()),
+                Token::ElementOpenStart(s) => Self::ElementOpenStart(s.into_owned()),
                 Token::ElementOpenEnd => Self::ElementOpenEnd,
                 Token::ElementSelfClose => Self::ElementSelfClose,
 
-                Token::ElementClose(s) => Self::ElementClose(s.to_owned()),
+                Token::ElementClose(s) => Self::ElementClose(s.into_owned()),
 
-                Token::AttributeName(s) => Self::AttributeName(s.to_owned()),
-                Token::AttributeValue(s) => Self::AttributeValue(s.to_owned()),
+                Token::AttributeName(s) => Self::AttributeName(s.into_owned()),
+                Token::AttributeValue(s) => Self::AttributeValue(s.into_owned()),
 
-                Token::Space(s) => Self::Space(s.to_owned()),
+                Token::Space(s) => Self::Space(s.into_owned()),
             }
         }
     }
