@@ -256,6 +256,34 @@ where
             Ok(Streaming::Complete(&s[..end_idx]))
         }
     }
+
+    async fn name_continuation(&mut self) -> Result<Streaming<&str>> {
+        let mut s = self.as_str();
+
+        while s.is_empty() {
+            self.extend().await?;
+            s = self.as_str();
+            // TODO: Avoid infinite loop
+        }
+
+        let c = s.char_indices();
+
+        let end_idx = match c
+            .take_while(|(_, c)| c.is_name_char())
+            .map(|(i, c)| i + c.len_utf8())
+            .last()
+        {
+            Some(i) => i,
+            None => return Ok(Streaming::Complete("")),
+        };
+
+        let s = self.as_str();
+        if end_idx == s.len() {
+            Ok(Streaming::Partial(s))
+        } else {
+            Ok(Streaming::Complete(&s[..end_idx]))
+        }
+    }
 }
 
 #[ext]
@@ -390,6 +418,14 @@ pub trait TokenSource {
     async fn next(&mut self) -> Option<Result<Token<'_>>>;
 }
 
+// TODO: Should we replace this with generics? We always know exactly
+// what to do at compile time.
+#[derive(Debug)]
+enum NameKind {
+    Start,
+    Continue,
+}
+
 #[derive(Debug)]
 pub struct Parser<S> {
     buffer: StringRing<S>,
@@ -423,22 +459,34 @@ where
             Ok(Some(Space(Streaming::Complete(&self.buffer.as_str()[..l]))))
         } else if *self.buffer.consume("</").await? {
             self.state = StreamElementCloseName;
-            self.dispatch_stream_element_close_name().await
+            self.dispatch_stream_element_close_name(NameKind::Start)
+                .await
         } else if *self.buffer.consume("<").await? {
             self.state = StreamElementOpenName;
-            self.dispatch_stream_element_open_name().await
+            self.dispatch_stream_element_open_name(NameKind::Start)
+                .await
         } else {
             unimplemented!()
         }
     }
 
-    async fn dispatch_stream_element_open_name(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_name(State::AfterElementOpenName, Token::ElementOpenStart)
-            .await
+    async fn dispatch_stream_element_open_name(
+        &mut self,
+        name_kind: NameKind,
+    ) -> Result<Option<Token<'_>>> {
+        self.stream_name(
+            name_kind,
+            State::AfterElementOpenName,
+            Token::ElementOpenStart,
+        )
+        .await
     }
 
-    async fn dispatch_stream_element_close_name(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_name(State::AfterElementCloseName, Token::ElementClose)
+    async fn dispatch_stream_element_close_name(
+        &mut self,
+        name_kind: NameKind,
+    ) -> Result<Option<Token<'_>>> {
+        self.stream_name(name_kind, State::AfterElementCloseName, Token::ElementClose)
             .await
     }
 
@@ -455,12 +503,15 @@ where
             Ok(Some(ElementOpenEnd))
         } else {
             self.state = StreamAttributeName;
-            self.dispatch_stream_attribute_name().await
+            self.dispatch_stream_attribute_name(NameKind::Start).await
         }
     }
 
-    async fn dispatch_stream_attribute_name(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_name(State::AfterAttributeName, Token::AttributeName)
+    async fn dispatch_stream_attribute_name(
+        &mut self,
+        name_kind: NameKind,
+    ) -> Result<Option<Token<'_>>> {
+        self.stream_name(name_kind, State::AfterAttributeName, Token::AttributeName)
             .await
     }
 
@@ -503,10 +554,14 @@ where
 
     async fn stream_name<'a>(
         &'a mut self,
+        name_kind: NameKind,
         next_state: State,
         create: impl FnOnce(Streaming<&'a str>) -> Token<'a>,
     ) -> Result<Option<Token<'_>>> {
-        let name = self.buffer.name().await?;
+        let name = match name_kind {
+            NameKind::Start => self.buffer.name().await?,
+            NameKind::Continue => self.buffer.name_continuation().await?,
+        };
 
         self.to_advance = name.unify().len();
 
@@ -531,14 +586,23 @@ where
         match self.state {
             Initial => self.dispatch_initial().await,
 
-            StreamElementOpenName => self.dispatch_stream_element_open_name().await,
+            StreamElementOpenName => {
+                self.dispatch_stream_element_open_name(NameKind::Continue)
+                    .await
+            }
             AfterElementOpenName => self.dispatch_after_element_open_name().await,
 
-            StreamAttributeName => self.dispatch_stream_attribute_name().await,
+            StreamAttributeName => {
+                self.dispatch_stream_attribute_name(NameKind::Continue)
+                    .await
+            }
             AfterAttributeName => self.dispatch_after_attribute_name().await,
             StreamAttributeValue => self.dispatch_stream_attribute_value().await,
 
-            StreamElementCloseName => self.dispatch_stream_element_close_name().await,
+            StreamElementCloseName => {
+                self.dispatch_stream_element_close_name(NameKind::Continue)
+                    .await
+            }
             AfterElementCloseName => self.dispatch_after_element_close_name().await,
         }
         .transpose()
@@ -773,6 +837,30 @@ mod test {
                     ElementOpenStart(Complete("a")),
                     ElementSelfClose,
                     Space(Complete("\r\n")),
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    // After parsing a name to the end of the buffer, when we start
+    // parsing again, we need to allow the first character to be a
+    // non-start-char.
+    #[test]
+    fn names_that_span_blocks_can_continue_with_non_start_chars() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_capacity(r#"<a--------/>"#, 8)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Partial("a------")),
+                    ElementOpenStart(Complete("--")),
+                    ElementSelfClose,
                 ],
             );
 
