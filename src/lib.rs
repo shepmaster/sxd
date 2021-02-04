@@ -933,54 +933,64 @@ mod test {
         }
     }
 
-    /// Owns all the string data to avoid keeping references alive
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum OwnedToken {
-        ElementOpenStart(Streaming<String>),
-        ElementOpenEnd,
-        ElementSelfClose,
+    macro_rules! mirror_owned_token {
+        (
+            $(#[$meta:meta])*
+            enum $e_name:ident {
+                $($v_name:ident $(($field:ty))?,)*
+            }
+        ) => {
 
-        ElementClose(Streaming<String>),
+            $(#[$meta])*
+            enum $e_name {
+                $($v_name $(($field))? ,)*
+            }
 
-        AttributeName(Streaming<String>),
-        AttributeValue(Streaming<String>),
+            impl From<Token<'_>> for $e_name {
+                fn from(other: Token<'_>) -> Self {
+                    match other {
+                        $(mirror_owned_token!(@from_pat s $v_name $($field)?) =>
+                          mirror_owned_token!(@from_arm s $v_name $($field)?) ,)*
+                    }
+                }
+            }
 
-        Space(Streaming<String>),
+            impl PartialEq<Token<'_>> for $e_name {
+                fn eq(&self, other: &Token<'_>) -> bool {
+                    match (self, other) {
+                        $(mirror_owned_token!(@eq_pat s1 s2 $v_name $($field)?) =>
+                          mirror_owned_token!(@eq_arm s1 s2 $v_name $($field)?) ,)*
+                        _ => false,
+                    }
+                }
+            }
+        };
+
+        (@from_pat $s:ident $v_name:ident $field:ty) => { Token::$v_name($s) };
+        (@from_arm $s:ident $v_name:ident $field:ty) => { Self::$v_name($s.into_owned()) };
+        (@from_pat $s:ident $v_name:ident) => { Token::$v_name };
+        (@from_arm $s:ident $v_name:ident) => { Self::$v_name };
+
+        (@eq_pat $s1:ident $s2:ident $v_name:ident $field:ty) => { (Self::$v_name($s1), Token::$v_name($s2)) };
+        (@eq_arm $s1:ident $s2:ident $v_name:ident $field:ty) => { $s1 == $s2 };
+        (@eq_pat $s1:ident $s2:ident $v_name:ident) => { (Self::$v_name, Token::$v_name) };
+        (@eq_arm $s1:ident $s2:ident $v_name:ident) => { true };
     }
 
-    impl From<Token<'_>> for OwnedToken {
-        fn from(other: Token<'_>) -> Self {
-            match other {
-                Token::ElementOpenStart(s) => Self::ElementOpenStart(s.into_owned()),
-                Token::ElementOpenEnd => Self::ElementOpenEnd,
-                Token::ElementSelfClose => Self::ElementSelfClose,
+    mirror_owned_token! {
+        /// Owns all the string data to avoid keeping references alive
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum OwnedToken {
+            ElementOpenStart(Streaming<String>),
+            ElementOpenEnd,
+            ElementSelfClose,
 
-                Token::ElementClose(s) => Self::ElementClose(s.into_owned()),
+            ElementClose(Streaming<String>),
 
-                Token::AttributeName(s) => Self::AttributeName(s.into_owned()),
-                Token::AttributeValue(s) => Self::AttributeValue(s.into_owned()),
+            AttributeName(Streaming<String>),
+            AttributeValue(Streaming<String>),
 
-                Token::Space(s) => Self::Space(s.into_owned()),
-            }
-        }
-    }
-
-    impl PartialEq<Token<'_>> for OwnedToken {
-        fn eq(&self, other: &Token<'_>) -> bool {
-            match (self, other) {
-                (Self::ElementOpenStart(s1), Token::ElementOpenStart(s2)) => s1 == s2,
-                (Self::ElementOpenEnd, Token::ElementOpenEnd) => true,
-                (Self::ElementSelfClose, Token::ElementSelfClose) => true,
-
-                (Self::ElementClose(s1), Token::ElementClose(s2)) => s1 == s2,
-
-                (Self::AttributeName(s1), Token::AttributeName(s2)) => s1 == s2,
-                (Self::AttributeValue(s1), Token::AttributeValue(s2)) => s1 == s2,
-
-                (Self::Space(s1), Token::Space(s2)) => s1 == s2,
-
-                _ => false,
-            }
+            Space(Streaming<String>),
         }
     }
 
