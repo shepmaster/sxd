@@ -127,7 +127,13 @@ where
         let n_new_utf8_bytes = match str::from_utf8(dangling_bytes) {
             Ok(s) => s.len(),
             Err(e) => match e.error_len() {
-                Some(_) => panic!("Invalid UTF8"),
+                Some(length) => {
+                    return InputNotUtf8 {
+                        location: self.absolute_location() + self.n_utf8_bytes + e.valid_up_to(),
+                        length,
+                    }
+                    .fail()
+                }
                 None => e.valid_up_to(),
             },
         };
@@ -616,6 +622,16 @@ pub enum Error {
     NoMoreInputAvailable,
 
     #[snafu(display(
+        "The {} bytes of input data, starting at byte {}, was not UTF-8",
+        length,
+        location,
+    ))]
+    InputNotUtf8 {
+        location: usize,
+        length: usize,
+    },
+
+    #[snafu(display(
         "Expected the token {:?} at byte {}, but it was missing",
         token,
         location
@@ -874,6 +890,25 @@ mod test {
         })
     }
 
+    #[test]
+    fn fail_non_utf_8() -> Result {
+        block_on(async {
+            let error = Parser::new_from_bytes(&[b'a', b'b', b'c', 0xFF])
+                .collect_owned()
+                .await;
+
+            assert_error!(
+                error,
+                Error::InputNotUtf8 {
+                    location: 3,
+                    length: 1,
+                }
+            );
+
+            Ok(())
+        })
+    }
+
     impl<'a> Parser<ReadAdapter<&'a [u8]>> {
         fn new_from_str(s: &'a str) -> Self {
             Self::new_from_str_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::DEFAULT_CAPACITY)
@@ -885,6 +920,15 @@ mod test {
 
         fn new_from_str_and_capacity(s: &'a str, capacity: usize) -> Self {
             let src = ReadAdapter::new(s.as_bytes());
+            Parser::with_buffer_capacity(src, capacity)
+        }
+
+        fn new_from_bytes(s: &'a [u8]) -> Self {
+            Self::new_from_bytes_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::DEFAULT_CAPACITY)
+        }
+
+        fn new_from_bytes_and_capacity(s: &'a [u8], capacity: usize) -> Self {
+            let src = ReadAdapter::new(s);
             Parser::with_buffer_capacity(src, capacity)
         }
     }
