@@ -87,6 +87,13 @@ where
         str::from_utf8(bytes).expect("Safety invariant failed")
     }
 
+    async fn some_str(&mut self) -> Result<&str> {
+        if self.n_utf8_bytes == 0 {
+            self.extend().await?;
+        }
+        Ok(self.as_str())
+    }
+
     fn absolute_location(&self) -> usize {
         self.n_retired_bytes + self.n_offset_bytes
     }
@@ -144,15 +151,12 @@ where
     }
 
     async fn starts_with(&mut self, needle: &str) -> Result<bool> {
-        let mut s = self.as_str();
-
-        while s.len() < needle.len() {
+        while self.n_utf8_bytes < needle.len() {
             // TODO: Avoid infinite loop
             self.extend().await?;
-            s = self.as_str();
         }
 
-        Ok(s.starts_with(needle))
+        Ok(self.as_str().starts_with(needle))
     }
 
     fn advance(&mut self, n_bytes: usize) {
@@ -194,13 +198,7 @@ where
     }
 
     async fn space(&mut self) -> Result<Option<usize>> {
-        let mut s = self.as_str();
-
-        while s.is_empty() {
-            self.extend().await?;
-            s = self.as_str();
-            // TODO: Avoid infinite loop
-        }
+        let s = self.some_str().await?;
 
         let space = s
             .char_indices()
@@ -224,13 +222,7 @@ where
     }
 
     async fn name(&mut self) -> Result<Streaming<&str>> {
-        let mut s = self.as_str();
-
-        while s.is_empty() {
-            self.extend().await?;
-            s = self.as_str();
-            // TODO: Avoid infinite loop
-        }
+        let s = self.some_str().await?;
 
         let mut c = s.char_indices();
 
@@ -249,7 +241,6 @@ where
             .last()
             .unwrap_or(end_idx);
 
-        let s = self.as_str();
         if end_idx == s.len() {
             Ok(Streaming::Partial(s))
         } else {
@@ -258,13 +249,7 @@ where
     }
 
     async fn name_continuation(&mut self) -> Result<Streaming<&str>> {
-        let mut s = self.as_str();
-
-        while s.is_empty() {
-            self.extend().await?;
-            s = self.as_str();
-            // TODO: Avoid infinite loop
-        }
+        let s = self.some_str().await?;
 
         let c = s.char_indices();
 
@@ -277,7 +262,6 @@ where
             None => return Ok(Streaming::Complete("")),
         };
 
-        let s = self.as_str();
         if end_idx == s.len() {
             Ok(Streaming::Partial(s))
         } else {
