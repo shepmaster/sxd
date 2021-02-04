@@ -41,9 +41,12 @@ where
 #[derive(Debug)]
 struct StringRing<S> {
     buffer: Vec<u8>,
+
     n_offset_bytes: usize,
     n_utf8_bytes: usize,
     n_dangling_bytes: usize,
+
+    n_retired_bytes: usize,
 
     source: S,
 }
@@ -67,10 +70,14 @@ where
 
         Self {
             buffer: vec![0; capacity],
-            source,
+
             n_offset_bytes: 0,
             n_utf8_bytes: 0,
             n_dangling_bytes: 0,
+
+            n_retired_bytes: 0,
+
+            source,
         }
     }
 
@@ -78,6 +85,10 @@ where
         // TODO: Alternate implementation without checks
         let bytes = &self.buffer[self.n_offset_bytes..][..self.n_utf8_bytes];
         str::from_utf8(bytes).expect("Safety invariant failed")
+    }
+
+    fn absolute_location(&self) -> usize {
+        self.n_retired_bytes + self.n_offset_bytes
     }
 
     async fn extend(&mut self) -> Result<()> {
@@ -89,6 +100,7 @@ where
             let e = s + self.n_utf8_bytes + self.n_dangling_bytes;
             self.buffer.copy_within(s..e, 0);
             self.n_offset_bytes = 0;
+            self.n_retired_bytes += s;
 
             buffer = &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..]
                 [self.n_dangling_bytes..];
@@ -158,7 +170,13 @@ where
     }
 
     async fn require(&mut self, s: &str) -> Result<()> {
-        ensure!(*self.consume(s).await?, RequiredTokenMissing { token: s });
+        ensure!(
+            *self.consume(s).await?,
+            RequiredTokenMissing {
+                token: s,
+                location: self.absolute_location(),
+            }
+        );
         Ok(())
     }
 
@@ -549,7 +567,15 @@ impl<T> std::ops::DerefMut for MustUse<T> {
 pub enum Error {
     NoMoreInputAvailable,
 
-    RequiredTokenMissing { token: String },
+    #[snafu(display(
+        "Expected the token {:?} at byte {}, but it was missing",
+        token,
+        location
+    ))]
+    RequiredTokenMissing {
+        token: String,
+        location: usize,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
