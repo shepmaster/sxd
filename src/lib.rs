@@ -583,9 +583,12 @@ where
     }
 
     async fn dispatch_after_element_close_name(&mut self) -> Result<Option<Token<'_>>> {
+        use State::*;
+
         self.buffer.consume_space().await?;
         self.buffer.require(">").await?;
 
+        self.state = Initial;
         self.dispatch_initial().await
     }
 
@@ -922,7 +925,7 @@ mod test {
     }
 
     #[test]
-    fn leading_and_trailing_whitespace() -> Result {
+    fn leading_and_trailing_whitespace_self_closed() -> Result {
         block_on(async {
             let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned().await?;
 
@@ -933,6 +936,29 @@ mod test {
                     Space(Complete("\t ")),
                     ElementOpenStart(Complete("a")),
                     ElementSelfClose,
+                    Space(Complete("\r\n")),
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn leading_and_trailing_whitespace() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str("\t <a></a>\r\n")
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    Space(Complete("\t ")),
+                    ElementOpenStart(Complete("a")),
+                    ElementOpenEnd,
+                    ElementClose(Complete("a")),
                     Space(Complete("\r\n")),
                 ],
             );
