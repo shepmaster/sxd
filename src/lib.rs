@@ -330,6 +330,9 @@ impl char {
 enum State {
     Initial,
 
+    StreamDeclarationVersion,
+    AfterDeclarationVersion,
+
     StreamElementOpenName,
     AfterElementOpenName,
 
@@ -387,6 +390,11 @@ where
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Token<'a> {
+    /// `<?xml version="1.9"`
+    DeclarationStart(Streaming<&'a str>),
+    /// `?>`
+    DeclarationClose,
+
     /// `<foo`
     ElementOpenStart(Streaming<&'a str>),
     /// `>`
@@ -449,6 +457,18 @@ where
         } else if let Some(l) = self.buffer.space().await? {
             self.to_advance = l;
             Ok(Some(Space(Streaming::Complete(&self.buffer.as_str()[..l]))))
+        } else if *self.buffer.consume("<?").await? {
+            if *self.buffer.consume("xml").await? {
+                self.buffer.consume_space().await?;
+                self.buffer.require("version").await?;
+                self.buffer.require("=").await?;
+                self.buffer.require("\"").await?;
+
+                self.state = StreamDeclarationVersion;
+                self.dispatch_stream_declaration_version().await
+            } else {
+                unimplemented!("Processing instructions not implemented");
+            }
         } else if *self.buffer.consume("</").await? {
             self.state = StreamElementCloseName;
             self.dispatch_stream_element_close_name(NameKind::Start)
@@ -460,6 +480,33 @@ where
         } else {
             unimplemented!()
         }
+    }
+
+    async fn dispatch_after_declaration_version(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        self.buffer.consume_space().await?;
+
+        self.buffer.require("?>").await?;
+
+        self.state = Initial;
+        self.to_advance = 2;
+        Ok(Some(DeclarationClose))
+    }
+
+    async fn dispatch_stream_declaration_version(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        let value = self.buffer.consume_until("\"").await?;
+
+        self.to_advance = value.unify().len();
+
+        if value.is_complete() {
+            self.state = AfterDeclarationVersion;
+            self.to_advance += 1; // Include the closing quote
+        }
+
+        Ok(Some(DeclarationStart(value)))
     }
 
     async fn dispatch_stream_element_open_name(
@@ -578,6 +625,9 @@ where
         match self.state {
             Initial => self.dispatch_initial().await,
 
+            StreamDeclarationVersion => self.dispatch_stream_declaration_version().await,
+            AfterDeclarationVersion => self.dispatch_after_declaration_version().await,
+
             StreamElementOpenName => {
                 self.dispatch_stream_element_open_name(NameKind::Continue)
                     .await
@@ -664,6 +714,44 @@ mod test {
                 $e
             )
         };
+    }
+
+    #[test]
+    fn xml_declaration() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str(r#"<?xml version="1.0"?>"#)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [DeclarationStart(Complete("1.0")), DeclarationClose],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn xml_declaration_small_capacity() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_min_capacity(r#"<?xml version="1.123456789"?>"#)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    DeclarationStart(Partial("1")),
+                    DeclarationStart(Complete(".123456789")),
+                    DeclarationClose,
+                ],
+            );
+
+            Ok(())
+        })
     }
 
     #[test]
@@ -979,6 +1067,9 @@ mod test {
         /// Owns all the string data to avoid keeping references alive
         #[derive(Debug, Clone, PartialEq, Eq)]
         enum OwnedToken {
+            DeclarationStart(Streaming<String>),
+            DeclarationClose,
+
             ElementOpenStart(Streaming<String>),
             ElementOpenEnd,
             ElementSelfClose,
