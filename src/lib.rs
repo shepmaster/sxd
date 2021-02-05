@@ -55,7 +55,9 @@ impl<S> StringRing<S>
 where
     S: DataSource,
 {
-    const MINIMUM_CAPACITY: usize = 2;
+    // The longest single token should be `standalone`, then round up
+    // a bit.
+    const MINIMUM_CAPACITY: usize = 16;
     const DEFAULT_CAPACITY: usize = 1024;
 
     fn new(source: S) -> Self {
@@ -682,7 +684,7 @@ mod test {
     #[test]
     fn self_closed_element_small_capacity() -> Result {
         block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(r#"<alpha />"#)
+            let tokens = Parser::new_from_str_and_min_capacity(r#"<a01234567890123456789 />"#)
                 .collect_owned()
                 .await?;
 
@@ -690,10 +692,8 @@ mod test {
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart(Partial("a")),
-                    ElementOpenStart(Partial("lp")),
-                    ElementOpenStart(Partial("ha")),
-                    ElementOpenStart(Complete("")),
+                    ElementOpenStart(Partial("a01234567890123")),
+                    ElementOpenStart(Complete("456789")),
                     ElementSelfClose,
                 ]
             );
@@ -727,24 +727,23 @@ mod test {
     #[test]
     fn self_closed_element_with_one_attribute_small_capacity() -> Result {
         block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(r#"<alpha beta="gamma"/>"#)
-                .collect_owned()
-                .await?;
+            let tokens = Parser::new_from_str_and_min_capacity(
+                r#"<a01234567890123456789 b01234567890123456789="c01234567890123456789"/>"#,
+            )
+            .collect_owned()
+            .await?;
 
             use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart(Partial("a")),
-                    ElementOpenStart(Partial("lp")),
-                    ElementOpenStart(Partial("ha")),
-                    ElementOpenStart(Complete("")),
-                    AttributeName(Partial("be")),
-                    AttributeName(Partial("ta")),
-                    AttributeName(Complete("")),
-                    AttributeValue(Partial("ga")),
-                    AttributeValue(Partial("mm")),
-                    AttributeValue(Complete("a")),
+                    ElementOpenStart(Partial("a01234567890123")),
+                    ElementOpenStart(Complete("456789")),
+                    AttributeName(Partial("b01234567")),
+                    AttributeName(Complete("890123456789")),
+                    AttributeValue(Partial("c0")),
+                    AttributeValue(Partial("1234567890123456")),
+                    AttributeValue(Complete("789")),
                     ElementSelfClose,
                 ],
             );
@@ -777,22 +776,21 @@ mod test {
     #[test]
     fn element_with_no_children_small_capacity() -> Result {
         block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(r#"<alpha></alpha>"#)
-                .collect_owned()
-                .await?;
+            let tokens = Parser::new_from_str_and_min_capacity(
+                r#"<a01234567890123456789></a01234567890123456789>"#,
+            )
+            .collect_owned()
+            .await?;
 
             use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart(Partial("a")),
-                    ElementOpenStart(Partial("lp")),
-                    ElementOpenStart(Partial("ha")),
-                    ElementOpenStart(Complete("")),
+                    ElementOpenStart(Partial("a01234567890123")),
+                    ElementOpenStart(Complete("456789")),
                     ElementOpenEnd,
-                    ElementClose(Partial("al")),
-                    ElementClose(Partial("ph")),
-                    ElementClose(Complete("a")),
+                    ElementClose(Partial("a012345")),
+                    ElementClose(Complete("67890123456789")),
                 ],
             );
 
@@ -861,7 +859,7 @@ mod test {
     #[test]
     fn names_that_span_blocks_can_continue_with_non_start_chars() -> Result {
         block_on(async {
-            let tokens = Parser::new_from_str_and_capacity(r#"<a--------/>"#, 8)
+            let tokens = Parser::new_from_str_and_min_capacity(r#"<a----------------/>"#)
                 .collect_owned()
                 .await?;
 
@@ -869,7 +867,7 @@ mod test {
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart(Partial("a------")),
+                    ElementOpenStart(Partial("a--------------")),
                     ElementOpenStart(Complete("--")),
                     ElementSelfClose,
                 ],
