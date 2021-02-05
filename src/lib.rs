@@ -478,7 +478,8 @@ where
             self.dispatch_stream_element_open_name(NameKind::Start)
                 .await
         } else {
-            unimplemented!()
+            let location = self.buffer.absolute_location();
+            InvalidXml { location }.fail()
         }
     }
 
@@ -693,6 +694,11 @@ pub enum Error {
     ))]
     RequiredTokenMissing {
         token: String,
+        location: usize,
+    },
+
+    #[snafu(display("The input data is not valid XML starting at byte {}", location))]
+    InvalidXml {
         location: usize,
     },
 }
