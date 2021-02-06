@@ -3,7 +3,6 @@
 
 use async_trait::async_trait;
 use easy_ext::ext;
-use itertools::Itertools;
 use snafu::{ensure, Snafu};
 use std::{mem, str};
 
@@ -222,7 +221,7 @@ where
 
         let end = s
             .char_indices()
-            .peeking_take_while(|&(_, c)| c != '<' && c != '&')
+            .take_while(|&(_, c)| c != '<' && c != '&')
             .last()
             .map(|(i, c)| i + c.len_utf8());
 
@@ -253,7 +252,7 @@ where
 
         let space = s
             .char_indices()
-            .peeking_take_while(|(_, c)| c.is_space())
+            .take_while(|(_, c)| c.is_space())
             .last()
             .map(|(i, c)| i + c.len_utf8());
 
