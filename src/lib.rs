@@ -357,7 +357,7 @@ impl char {
 enum State {
     Initial,
 
-    StreamDeclarationVersion,
+    StreamDeclarationVersion(Quote),
     AfterDeclarationVersion,
 
     StreamElementOpenName,
@@ -524,10 +524,10 @@ where
                 self.buffer.consume_space().await?;
                 self.buffer.require("version").await?;
                 self.buffer.require("=").await?;
-                self.buffer.require(&Quote::Double).await?;
+                let quote = self.buffer.require_quote().await?;
 
-                self.state = StreamDeclarationVersion;
-                self.dispatch_stream_declaration_version().await
+                self.state = StreamDeclarationVersion(quote);
+                self.dispatch_stream_declaration_version(quote).await
             } else {
                 self.state = StreamProcessingInstructionName;
                 self.dispatch_stream_processing_instruction_name(NameKind::Start)
@@ -567,16 +567,19 @@ where
         Ok(Some(DeclarationClose))
     }
 
-    async fn dispatch_stream_declaration_version(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_declaration_version(
+        &mut self,
+        quote: Quote,
+    ) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until(&Quote::Double).await?;
+        let value = self.buffer.consume_until(quote).await?;
 
         self.to_advance = value.unify().len();
 
         if value.is_complete() {
             self.state = AfterDeclarationVersion;
-            self.to_advance += 1; // Include the closing quote
+            self.to_advance += quote.as_ref().len(); // Include the closing quote
         }
 
         Ok(Some(DeclarationStart(value)))
@@ -748,7 +751,9 @@ where
         match self.state {
             Initial => self.dispatch_initial().await,
 
-            StreamDeclarationVersion => self.dispatch_stream_declaration_version().await,
+            StreamDeclarationVersion(quote) => {
+                self.dispatch_stream_declaration_version(quote).await
+            }
             AfterDeclarationVersion => self.dispatch_after_declaration_version().await,
 
             StreamElementOpenName => {

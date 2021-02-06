@@ -93,6 +93,19 @@ mod test {
     }
 
     #[test]
+    fn xml_declaration_single_quoted() -> Result {
+        let tokens = Parser::new_from_str(r#"<?xml version='1.0'?>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [DeclarationStart(Complete("1.0")), DeclarationClose],
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn self_closed_element() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned()?;
 
