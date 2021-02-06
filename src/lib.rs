@@ -205,6 +205,26 @@ where
         }
     }
 
+    /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
+    async fn char_data(&mut self) -> Result<Option<usize>> {
+        let s = self.some_str().await?;
+
+        let end = s
+            .char_indices()
+            .peeking_take_while(|&(_, c)| c != '<' && c != '&')
+            .last()
+            .map(|(i, c)| i + c.len_utf8());
+
+        match end {
+            Some(0) => Ok(None),
+            Some(offset) => {
+                let offset = s[..offset].find("]]>").unwrap_or(offset);
+                Ok(Some(offset))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn space(&mut self) -> Result<Option<usize>> {
         let s = self.some_str().await?;
 
@@ -410,6 +430,8 @@ pub enum Token<'a> {
     /// `="bar`
     AttributeValue(Streaming<&'a str>),
 
+    /// `hello world`
+    CharData(Streaming<&'a str>),
     Space(Streaming<&'a str>),
 }
 
@@ -454,9 +476,6 @@ where
 
         if self.buffer.complete().await? {
             Ok(None)
-        } else if let Some(l) = self.buffer.space().await? {
-            self.to_advance = l;
-            Ok(Some(Space(Streaming::Complete(&self.buffer.as_str()[..l]))))
         } else if *self.buffer.consume("<?").await? {
             if *self.buffer.consume("xml").await? {
                 self.buffer.consume_space().await?;
@@ -477,6 +496,14 @@ where
             self.state = StreamElementOpenName;
             self.dispatch_stream_element_open_name(NameKind::Start)
                 .await
+        } else if let Some(l) = self.buffer.space().await? {
+            self.to_advance = l;
+            let s = &self.buffer.as_str()[..l];
+            Ok(Some(Space(Streaming::Complete(s))))
+        } else if let Some(l) = self.buffer.char_data().await? {
+            self.to_advance = l;
+            let s = &self.buffer.as_str()[..l];
+            Ok(Some(CharData(Streaming::Complete(s))))
         } else {
             let location = self.buffer.absolute_location();
             InvalidXml { location }.fail()
@@ -919,6 +946,26 @@ mod test {
     }
 
     #[test]
+    fn char_data() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str("<a>b</a>").collect_owned().await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Complete("a")),
+                    ElementOpenEnd,
+                    CharData(Complete("b")),
+                    ElementClose(Complete("a")),
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
     fn only_space() -> Result {
         block_on(async {
             let tokens = Parser::new_from_str(" \t\r\n").collect_owned().await?;
@@ -1111,6 +1158,7 @@ mod test {
             AttributeName(Streaming<String>),
             AttributeValue(Streaming<String>),
 
+            CharData(Streaming<String>),
             Space(Streaming<String>),
         }
     }
