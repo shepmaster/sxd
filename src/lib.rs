@@ -366,6 +366,9 @@ enum State {
 
     StreamElementCloseName,
     AfterElementCloseName,
+
+    StreamProcessingInstructionName,
+    AfterProcessingInstructionName,
 }
 
 #[derive(Debug, Copy, Clone, Eq)]
@@ -437,6 +440,11 @@ pub enum Token<'a> {
     /// `hello world`
     CharData(Streaming<&'a str>),
     Space(Streaming<&'a str>),
+
+    /// `<?a`
+    ProcessingInstructionStart(Streaming<&'a str>),
+    /// `?>`
+    ProcessingInstructionEnd,
 }
 
 #[async_trait(?Send)]
@@ -490,7 +498,9 @@ where
                 self.state = StreamDeclarationVersion;
                 self.dispatch_stream_declaration_version().await
             } else {
-                unimplemented!("Processing instructions not implemented");
+                self.state = StreamProcessingInstructionName;
+                self.dispatch_stream_processing_instruction_name(NameKind::Start)
+                    .await
             }
         } else if *self.buffer.consume("</").await? {
             self.state = StreamElementCloseName;
@@ -624,6 +634,28 @@ where
         self.dispatch_initial().await
     }
 
+    async fn dispatch_stream_processing_instruction_name(
+        &mut self,
+        name_kind: NameKind,
+    ) -> Result<Option<Token<'_>>> {
+        self.stream_name(
+            name_kind,
+            State::AfterProcessingInstructionName,
+            Token::ProcessingInstructionStart,
+        )
+        .await
+    }
+
+    async fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        self.buffer.consume_space().await?;
+        self.buffer.require("?>").await?;
+
+        self.state = Initial;
+        Ok(Some(ProcessingInstructionEnd))
+    }
+
     // ----------
 
     async fn stream_name<'a>(
@@ -681,6 +713,14 @@ where
                     .await
             }
             AfterElementCloseName => self.dispatch_after_element_close_name().await,
+
+            StreamProcessingInstructionName => {
+                self.dispatch_stream_processing_instruction_name(NameKind::Continue)
+                    .await
+            }
+            AfterProcessingInstructionName => {
+                self.dispatch_after_processing_instruction_name().await
+            }
         }
         .transpose()
     }
@@ -1025,6 +1065,45 @@ mod test {
         })
     }
 
+    #[test]
+    fn processing_instruction() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str("<?a?>").collect_owned().await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ProcessingInstructionStart(Complete("a")),
+                    ProcessingInstructionEnd,
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn processing_instruction_small_capacity() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa?>")
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
+                    ProcessingInstructionStart(Complete("aaaaaa")),
+                    ProcessingInstructionEnd,
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
     // After parsing a name to the end of the buffer, when we start
     // parsing again, we need to allow the first character to be a
     // non-start-char.
@@ -1172,6 +1251,9 @@ mod test {
 
             CharData(Streaming<String>),
             Space(Streaming<String>),
+
+            ProcessingInstructionStart(Streaming<String>),
+            ProcessingInstructionEnd,
         }
     }
 
