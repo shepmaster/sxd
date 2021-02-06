@@ -20,10 +20,6 @@ where
     }
 }
 
-pub trait TokenSource {
-    fn next(&mut self) -> Option<Result<Token<'_>>>;
-}
-
 pub struct Parser<R>(super::Parser<ReadAdapter<R>>);
 
 impl<R> Parser<R>
@@ -38,15 +34,8 @@ where
         let raw = super::Parser::with_buffer_capacity(ReadAdapter(source), capacity);
         Self(raw)
     }
-}
 
-impl<R> TokenSource for Parser<R>
-where
-    R: io::Read,
-{
-    fn next(&mut self) -> Option<Result<Token<'_>>> {
-        use crate::TokenSource;
-
+    pub fn next(&mut self) -> Option<Result<Token<'_>>> {
         // TODO: Would implementing our own executor improve performance?
         executor::block_on(self.0.next())
     }
@@ -55,7 +44,6 @@ where
 #[cfg(test)]
 mod test {
     use crate::{test::OwnedToken, Error, Streaming, StringRing, Token};
-    use easy_ext::ext;
 
     use super::*;
 
@@ -505,10 +493,9 @@ mod test {
         }
     }
 
-    #[ext]
-    impl<T> T
+    impl<R> Parser<R>
     where
-        Self: TokenSource,
+        R: std::io::Read,
     {
         fn collect_owned(&mut self) -> super::Result<Vec<OwnedToken>> {
             let mut v = vec![];

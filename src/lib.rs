@@ -496,11 +496,6 @@ pub enum Token<'a> {
     ProcessingInstructionEnd,
 }
 
-#[async_trait(?Send)]
-pub trait TokenSource {
-    async fn next(&mut self) -> Option<Result<Token<'_>>>;
-}
-
 // TODO: Should we replace this with generics? We always know exactly
 // what to do at compile time.
 #[derive(Debug)]
@@ -530,6 +525,56 @@ where
             state: State::Initial,
             to_advance: 0,
         }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<Token<'_>>> {
+        use State::*;
+
+        let to_advance = mem::take(&mut self.to_advance);
+        self.buffer.advance(to_advance);
+
+        match self.state {
+            Initial => self.dispatch_initial().await,
+
+            StreamDeclarationVersion(quote) => {
+                self.dispatch_stream_declaration_version(quote).await
+            }
+            AfterDeclarationVersion => self.dispatch_after_declaration_version().await,
+
+            StreamElementOpenName => {
+                self.dispatch_stream_element_open_name(NameKind::Continue)
+                    .await
+            }
+            AfterElementOpenName => self.dispatch_after_element_open_name().await,
+
+            StreamAttributeName => {
+                self.dispatch_stream_attribute_name(NameKind::Continue)
+                    .await
+            }
+            AfterAttributeName => self.dispatch_after_attribute_name().await,
+            StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote).await,
+
+            StreamElementCloseName => {
+                self.dispatch_stream_element_close_name(NameKind::Continue)
+                    .await
+            }
+            AfterElementCloseName => self.dispatch_after_element_close_name().await,
+
+            StreamProcessingInstructionName => {
+                self.dispatch_stream_processing_instruction_name(NameKind::Continue)
+                    .await
+            }
+            AfterProcessingInstructionName => {
+                self.dispatch_after_processing_instruction_name().await
+            }
+            StreamProcessingInstructionValue => {
+                self.dispatch_stream_processing_instruction_value().await
+            }
+            AfterProcessingInstructionValue => {
+                self.dispatch_after_processing_instruction_value().await
+            }
+        }
+        .transpose()
     }
 
     async fn dispatch_initial(&mut self) -> Result<Option<Token<'_>>> {
@@ -760,62 +805,6 @@ where
             self.state = next_state;
         }
         Ok(Some(create(name)))
-    }
-}
-
-#[async_trait(?Send)]
-impl<S> TokenSource for Parser<S>
-where
-    S: DataSource,
-{
-    async fn next(&mut self) -> Option<Result<Token<'_>>> {
-        use State::*;
-
-        let to_advance = mem::take(&mut self.to_advance);
-        self.buffer.advance(to_advance);
-
-        match self.state {
-            Initial => self.dispatch_initial().await,
-
-            StreamDeclarationVersion(quote) => {
-                self.dispatch_stream_declaration_version(quote).await
-            }
-            AfterDeclarationVersion => self.dispatch_after_declaration_version().await,
-
-            StreamElementOpenName => {
-                self.dispatch_stream_element_open_name(NameKind::Continue)
-                    .await
-            }
-            AfterElementOpenName => self.dispatch_after_element_open_name().await,
-
-            StreamAttributeName => {
-                self.dispatch_stream_attribute_name(NameKind::Continue)
-                    .await
-            }
-            AfterAttributeName => self.dispatch_after_attribute_name().await,
-            StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote).await,
-
-            StreamElementCloseName => {
-                self.dispatch_stream_element_close_name(NameKind::Continue)
-                    .await
-            }
-            AfterElementCloseName => self.dispatch_after_element_close_name().await,
-
-            StreamProcessingInstructionName => {
-                self.dispatch_stream_processing_instruction_name(NameKind::Continue)
-                    .await
-            }
-            AfterProcessingInstructionName => {
-                self.dispatch_after_processing_instruction_name().await
-            }
-            StreamProcessingInstructionValue => {
-                self.dispatch_stream_processing_instruction_value().await
-            }
-            AfterProcessingInstructionValue => {
-                self.dispatch_after_processing_instruction_value().await
-            }
-        }
-        .transpose()
     }
 }
 

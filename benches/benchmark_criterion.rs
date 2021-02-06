@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use sxd_pull_parser::blocking::{Parser, TokenSource};
+use sxd_pull_parser::blocking::Parser;
 
 fn filename() -> &'static str {
     option_env!("FILE").unwrap_or("examples/standard.xml")

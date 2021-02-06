@@ -1,7 +1,7 @@
 pub use libxml2_sys;
 pub use sxd_pull_parser;
 
-use sxd_pull_parser::blocking::{Parser, TokenSource};
+use sxd_pull_parser::blocking::Parser;
 
 pub type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
