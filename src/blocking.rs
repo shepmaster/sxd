@@ -167,6 +167,26 @@ mod test {
     }
 
     #[test]
+    fn attributes_with_both_quote_styles() -> Result {
+        let tokens = Parser::new_from_str(r#"<alpha a="b" c='d'/>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("alpha")),
+                AttributeName(Complete("a")),
+                AttributeValue(Complete("b")),
+                AttributeName(Complete("c")),
+                AttributeValue(Complete("d")),
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn element_with_no_children() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha></alpha>"#).collect_owned()?;
 

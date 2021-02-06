@@ -155,7 +155,9 @@ where
         self.n_utf8_bytes = self.n_utf8_bytes.saturating_sub(n_bytes);
     }
 
-    async fn consume(&mut self, s: &str) -> Result<MustUse<bool>> {
+    async fn consume(&mut self, s: impl AsRef<str>) -> Result<MustUse<bool>> {
+        let s = s.as_ref();
+
         if self.starts_with(s).await? {
             self.advance(s.len());
             Ok(MustUse(true))
@@ -164,7 +166,9 @@ where
         }
     }
 
-    async fn require(&mut self, s: &str) -> Result<()> {
+    async fn require(&mut self, s: impl AsRef<str>) -> Result<()> {
+        let s = s.as_ref();
+
         ensure!(
             *self.consume(s).await?,
             RequiredTokenMissing {
@@ -175,14 +179,25 @@ where
         Ok(())
     }
 
-    async fn consume_until(&mut self, needle: &str) -> Result<Streaming<&str>> {
+    async fn require_quote(&mut self) -> Result<Quote> {
+        if *self.consume(&Quote::Double).await? {
+            Ok(Quote::Double)
+        } else if *self.consume(&Quote::Single).await? {
+            Ok(Quote::Single)
+        } else {
+            let location = self.absolute_location();
+            ExpectedSingleOrDoubleQuote { location }.fail()
+        }
+    }
+
+    async fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<&str>> {
         let mut s = self.as_str();
         if s.is_empty() {
             self.extend().await?;
             s = self.as_str();
         }
 
-        match s.find(needle) {
+        match s.find(needle.as_ref()) {
             Some(x) => Ok(Streaming::Complete(&self.as_str()[..x])),
             None => Ok(Streaming::Partial(self.as_str())),
         }
@@ -350,7 +365,7 @@ enum State {
 
     StreamAttributeName,
     AfterAttributeName,
-    StreamAttributeValue,
+    StreamAttributeValue(Quote),
 
     StreamElementCloseName,
     AfterElementCloseName,
@@ -401,6 +416,30 @@ where
             (Streaming::Partial(a), Streaming::Partial(b)) => a == b,
             (Streaming::Complete(a), Streaming::Complete(b)) => a == b,
             _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum Quote {
+    Single,
+    Double,
+}
+
+impl Quote {
+    fn to_char(&self) -> char {
+        match self {
+            Self::Single => '\'',
+            Self::Double => '"',
+        }
+    }
+}
+
+impl AsRef<str> for Quote {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Single => "'",
+            Self::Double => "\"",
         }
     }
 }
@@ -485,7 +524,7 @@ where
                 self.buffer.consume_space().await?;
                 self.buffer.require("version").await?;
                 self.buffer.require("=").await?;
-                self.buffer.require("\"").await?;
+                self.buffer.require(&Quote::Double).await?;
 
                 self.state = StreamDeclarationVersion;
                 self.dispatch_stream_declaration_version().await
@@ -531,7 +570,7 @@ where
     async fn dispatch_stream_declaration_version(&mut self) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until("\"").await?;
+        let value = self.buffer.consume_until(&Quote::Double).await?;
 
         self.to_advance = value.unify().len();
 
@@ -594,23 +633,22 @@ where
         self.buffer.consume_space().await?;
         self.buffer.require("=").await?;
         self.buffer.consume_space().await?;
+        let quote = self.buffer.require_quote().await?;
 
-        self.buffer.require("\"").await?;
-
-        self.state = StreamAttributeValue;
-        self.dispatch_stream_attribute_value().await
+        self.state = StreamAttributeValue(quote);
+        self.dispatch_stream_attribute_value(quote).await
     }
 
-    async fn dispatch_stream_attribute_value(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<Token<'_>>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until("\"").await?;
+        let value = self.buffer.consume_until(&quote).await?;
 
         self.to_advance = value.unify().len();
 
         if value.is_complete() {
             self.state = AfterElementOpenName;
-            self.to_advance += 1 // Include the closing quote
+            self.to_advance += quote.as_ref().len() // Include the closing quote
         }
 
         Ok(Some(AttributeValue(value)))
@@ -724,7 +762,7 @@ where
                     .await
             }
             AfterAttributeName => self.dispatch_after_attribute_name().await,
-            StreamAttributeValue => self.dispatch_stream_attribute_value().await,
+            StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote).await,
 
             StreamElementCloseName => {
                 self.dispatch_stream_element_close_name(NameKind::Continue)
@@ -790,6 +828,14 @@ pub enum Error {
     ))]
     RequiredTokenMissing {
         token: String,
+        location: usize,
+    },
+
+    #[snafu(display(
+        "Expected either a single or double quote around the attribute value at byte {}",
+        location,
+    ))]
+    ExpectedSingleOrDoubleQuote {
         location: usize,
     },
 
