@@ -63,9 +63,12 @@ where
     }
 
     fn as_str(&self) -> &str {
-        // TODO: Alternate implementation without checks
         let bytes = &self.buffer[self.n_offset_bytes..][..self.n_utf8_bytes];
-        str::from_utf8(bytes).expect("Safety invariant failed")
+
+        // SAFETY: The range of bytes that are valid UTF-8 is checked
+        // when `extend`ing the buffer and when advancing it. Checking
+        // it again here leads to a massive (~1000X) slowdown.
+        unsafe { str::from_utf8_unchecked(bytes) }
     }
 
     async fn min_str(&mut self, len: usize) -> Result<&str> {
@@ -109,6 +112,8 @@ where
 
         let dangling_bytes =
             &self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][..self.n_dangling_bytes];
+
+        // SAFETY: This helps uphold the safety invariants in `as_str`
         let n_new_utf8_bytes = match str::from_utf8(dangling_bytes) {
             Ok(s) => s.len(),
             Err(e) => match e.error_len() {
@@ -155,6 +160,7 @@ where
     }
 
     fn advance(&mut self, n_bytes: usize) {
+        // SAFETY: These help uphold the safety invariants in `as_str`
         assert!(n_bytes <= self.n_utf8_bytes);
         assert!(self.as_str().is_char_boundary(n_bytes));
 
