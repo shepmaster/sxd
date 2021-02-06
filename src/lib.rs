@@ -68,11 +68,15 @@ where
         str::from_utf8(bytes).expect("Safety invariant failed")
     }
 
-    async fn some_str(&mut self) -> Result<&str> {
-        if self.n_utf8_bytes == 0 {
+    async fn min_str(&mut self, len: usize) -> Result<&str> {
+        if self.n_utf8_bytes < len {
             self.extend().await?;
         }
         Ok(self.as_str())
+    }
+
+    async fn some_str(&mut self) -> Result<&str> {
+        self.min_str(1).await
     }
 
     fn absolute_location(&self) -> usize {
@@ -224,11 +228,14 @@ where
     }
 
     async fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
-        let s = self.some_str().await?;
+        let s = self.min_str(2).await?;
 
         match s.find("?>") {
             Some(offset) => Ok(Streaming::Complete(&s[..offset])),
-            None => Ok(Streaming::Partial(s)),
+            None => {
+                let s = s.strip_suffix('?').unwrap_or(s);
+                Ok(Streaming::Partial(s))
+            }
         }
     }
 

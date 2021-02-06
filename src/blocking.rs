@@ -430,6 +430,28 @@ mod test {
     }
 
     #[test]
+    fn multi_byte_lookahead_that_spans_blocks() -> Result {
+        // Parser looked for `?>`, which was split across the current
+        // buffer and the next.
+        let input = "<?a aaaaaaaaaaaaaaaaaaaaaaaaaaa?>";
+
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Complete("a")),
+                ProcessingInstructionValue(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                ProcessingInstructionValue(Complete("")),
+                ProcessingInstructionEnd,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn fail_non_utf_8() -> Result {
         let error = Parser::new_from_bytes(&[b'a', b'b', b'c', 0xFF]).collect_owned();
 
