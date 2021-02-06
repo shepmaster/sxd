@@ -229,6 +229,15 @@ where
         }
     }
 
+    async fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
+        let s = self.some_str().await?;
+
+        match s.find("?>") {
+            Some(offset) => Ok(Streaming::Complete(&s[..offset])),
+            None => Ok(Streaming::Partial(s)),
+        }
+    }
+
     async fn space(&mut self) -> Result<Option<usize>> {
         let s = self.some_str().await?;
 
@@ -369,6 +378,8 @@ enum State {
 
     StreamProcessingInstructionName,
     AfterProcessingInstructionName,
+    StreamProcessingInstructionValue,
+    AfterProcessingInstructionValue,
 }
 
 #[derive(Debug, Copy, Clone, Eq)]
@@ -443,6 +454,8 @@ pub enum Token<'a> {
 
     /// `<?a`
     ProcessingInstructionStart(Streaming<&'a str>),
+    /// `b`
+    ProcessingInstructionValue(Streaming<&'a str>),
     /// `?>`
     ProcessingInstructionEnd,
 }
@@ -650,6 +663,32 @@ where
         use {State::*, Token::*};
 
         self.buffer.consume_space().await?;
+
+        if *self.buffer.consume("?>").await? {
+            self.state = Initial;
+            Ok(Some(ProcessingInstructionEnd))
+        } else {
+            self.state = State::StreamProcessingInstructionValue;
+            self.dispatch_stream_processing_instruction_value().await
+        }
+    }
+
+    async fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        let value = self.buffer.processing_instruction_value().await?;
+        self.to_advance = value.unify().len();
+
+        if value.is_complete() {
+            self.state = AfterProcessingInstructionValue;
+        }
+
+        Ok(Some(ProcessingInstructionValue(value)))
+    }
+
+    async fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
         self.buffer.require("?>").await?;
 
         self.state = Initial;
@@ -720,6 +759,12 @@ where
             }
             AfterProcessingInstructionName => {
                 self.dispatch_after_processing_instruction_name().await
+            }
+            StreamProcessingInstructionValue => {
+                self.dispatch_stream_processing_instruction_value().await
+            }
+            AfterProcessingInstructionValue => {
+                self.dispatch_after_processing_instruction_value().await
             }
         }
         .transpose()
@@ -1104,6 +1149,50 @@ mod test {
         })
     }
 
+    #[test]
+    fn processing_instruction_with_value() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str("<?a b?>").collect_owned().await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ProcessingInstructionStart(Complete("a")),
+                    ProcessingInstructionValue(Complete("b")),
+                    ProcessingInstructionEnd,
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn processing_instruction_with_value_small_buffer() -> Result {
+        block_on(async {
+            let tokens = Parser::new_from_str_and_min_capacity(
+                "<?aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb?>",
+            )
+            .collect_owned()
+            .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
+                    ProcessingInstructionStart(Complete("aaaaaa")),
+                    ProcessingInstructionValue(Partial("bbbbbbbbb")),
+                    ProcessingInstructionValue(Complete("bbbbbbbbbbb")),
+                    ProcessingInstructionEnd
+                ],
+            );
+
+            Ok(())
+        })
+    }
+
     // After parsing a name to the end of the buffer, when we start
     // parsing again, we need to allow the first character to be a
     // non-start-char.
@@ -1253,6 +1342,7 @@ mod test {
             Space(Streaming<String>),
 
             ProcessingInstructionStart(Streaming<String>),
+            ProcessingInstructionValue(Streaming<String>),
             ProcessingInstructionEnd,
         }
     }
