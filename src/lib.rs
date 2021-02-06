@@ -161,7 +161,11 @@ where
     async fn starts_with(&mut self, needle: &str) -> Result<bool> {
         while self.n_utf8_bytes < needle.len() {
             // TODO: Avoid infinite loop
-            self.extend().await?;
+            match self.extend().await {
+                Ok(_) => {}
+                Err(Error::NoMoreInputAvailable) => return Ok(false),
+                error => error?,
+            }
         }
 
         Ok(self.as_str().starts_with(needle))
@@ -684,6 +688,7 @@ where
 
 // https://github.com/rust-lang/rust/issues/78149
 #[must_use]
+#[derive(Debug)]
 struct MustUse<T>(T);
 
 impl<T> std::ops::Deref for MustUse<T> {
@@ -1045,11 +1050,18 @@ mod test {
     }
 
     #[test]
-    fn fail_one_character() -> Result {
+    fn multi_byte_lookahead_at_end_of_input() -> Result {
         block_on(async {
-            let error = Parser::new_from_str(r#"a"#).collect_owned().await;
+            // Parser looked for `<?`, which didn't fit and since
+            // we ran out of input, we got an error.
+            let input = " ";
 
-            assert_error!(error, Error::NoMoreInputAvailable);
+            let tokens = Parser::new_from_str_and_min_capacity(input)
+                .collect_owned()
+                .await?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(tokens, [Space(Complete(" "))]);
 
             Ok(())
         })
