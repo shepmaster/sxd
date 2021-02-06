@@ -7,35 +7,14 @@ use itertools::Itertools;
 use snafu::{ensure, Snafu};
 use std::{mem, str};
 
+#[macro_use]
+mod macros;
+
+pub mod blocking;
+
 #[async_trait(?Send)]
 pub trait DataSource {
     async fn read(&mut self, buffer: &mut [u8]) -> usize;
-}
-
-/// Adapts an implementer of [`std::io::Read`].
-///
-/// This should **not** be used unless you are also using the parser
-/// from a completely synchronous context.
-#[derive(Debug)]
-pub struct ReadAdapter<R>(R);
-
-impl<R> ReadAdapter<R>
-where
-    R: std::io::Read,
-{
-    pub fn new(read: R) -> Self {
-        Self(read)
-    }
-}
-
-#[async_trait(?Send)]
-impl<R> DataSource for ReadAdapter<R>
-where
-    R: std::io::Read,
-{
-    async fn read(&mut self, buffer: &mut [u8]) -> usize {
-        self.0.read(buffer).expect("TODO")
-    }
 }
 
 #[derive(Debug)]
@@ -488,7 +467,7 @@ where
         Self::with_buffer_capacity(source, StringRing::<S>::DEFAULT_CAPACITY)
     }
 
-    fn with_buffer_capacity(source: S, capacity: usize) -> Self {
+    pub fn with_buffer_capacity(source: S, capacity: usize) -> Self {
         Parser {
             buffer: StringRing::with_buffer_capacity(source, capacity),
             state: State::Initial,
@@ -824,470 +803,20 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[cfg(test)]
 mod test {
-    use easy_ext::ext;
-    use futures::executor::block_on;
-
     use super::*;
 
     type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
-    macro_rules! assert_error {
-        ($e:expr, $p:pat) => {
-            assert!(
-                matches!($e, Err($p)),
-                "Expected {}, but got {:?}",
-                stringify!($p),
-                $e
-            )
-        };
-    }
-
-    #[test]
-    fn xml_declaration() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str(r#"<?xml version="1.0"?>"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [DeclarationStart(Complete("1.0")), DeclarationClose],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn xml_declaration_small_capacity() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(r#"<?xml version="1.123456789"?>"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    DeclarationStart(Partial("1")),
-                    DeclarationStart(Complete(".123456789")),
-                    DeclarationClose,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn self_closed_element() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned().await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [ElementOpenStart(Complete("alpha")), ElementSelfClose]
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn self_closed_element_small_capacity() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(r#"<a01234567890123456789 />"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Partial("a01234567890123")),
-                    ElementOpenStart(Complete("456789")),
-                    ElementSelfClose,
-                ]
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn self_closed_element_with_one_attribute() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str(r#"<alpha a="b"/>"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Complete("alpha")),
-                    AttributeName(Complete("a")),
-                    AttributeValue(Complete("b")),
-                    ElementSelfClose,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn self_closed_element_with_one_attribute_small_capacity() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(
-                r#"<a01234567890123456789 b01234567890123456789="c01234567890123456789"/>"#,
-            )
-            .collect_owned()
-            .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Partial("a01234567890123")),
-                    ElementOpenStart(Complete("456789")),
-                    AttributeName(Partial("b01234567")),
-                    AttributeName(Complete("890123456789")),
-                    AttributeValue(Partial("c0")),
-                    AttributeValue(Partial("1234567890123456")),
-                    AttributeValue(Complete("789")),
-                    ElementSelfClose,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn element_with_no_children() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str(r#"<alpha></alpha>"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Complete("alpha")),
-                    ElementOpenEnd,
-                    ElementClose(Complete("alpha")),
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn element_with_no_children_small_capacity() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(
-                r#"<a01234567890123456789></a01234567890123456789>"#,
-            )
-            .collect_owned()
-            .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Partial("a01234567890123")),
-                    ElementOpenStart(Complete("456789")),
-                    ElementOpenEnd,
-                    ElementClose(Partial("a012345")),
-                    ElementClose(Complete("67890123456789")),
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn element_with_one_child() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str(r#"<alpha><beta /></alpha>"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Complete("alpha")),
-                    ElementOpenEnd,
-                    ElementOpenStart(Complete("beta")),
-                    ElementSelfClose,
-                    ElementClose(Complete("alpha")),
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn char_data() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str("<a>b</a>").collect_owned().await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Complete("a")),
-                    ElementOpenEnd,
-                    CharData(Complete("b")),
-                    ElementClose(Complete("a")),
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn only_space() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str(" \t\r\n").collect_owned().await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(tokens, [Space(Complete(" \t\r\n"))]);
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn leading_and_trailing_whitespace_self_closed() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned().await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    Space(Complete("\t ")),
-                    ElementOpenStart(Complete("a")),
-                    ElementSelfClose,
-                    Space(Complete("\r\n")),
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn leading_and_trailing_whitespace() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str("\t <a></a>\r\n")
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    Space(Complete("\t ")),
-                    ElementOpenStart(Complete("a")),
-                    ElementOpenEnd,
-                    ElementClose(Complete("a")),
-                    Space(Complete("\r\n")),
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn processing_instruction() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str("<?a?>").collect_owned().await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ProcessingInstructionStart(Complete("a")),
-                    ProcessingInstructionEnd,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn processing_instruction_small_capacity() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa?>")
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
-                    ProcessingInstructionStart(Complete("aaaaaa")),
-                    ProcessingInstructionEnd,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn processing_instruction_with_value() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str("<?a b?>").collect_owned().await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ProcessingInstructionStart(Complete("a")),
-                    ProcessingInstructionValue(Complete("b")),
-                    ProcessingInstructionEnd,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn processing_instruction_with_value_small_buffer() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(
-                "<?aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb?>",
-            )
-            .collect_owned()
-            .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
-                    ProcessingInstructionStart(Complete("aaaaaa")),
-                    ProcessingInstructionValue(Partial("bbbbbbbbb")),
-                    ProcessingInstructionValue(Complete("bbbbbbbbbbb")),
-                    ProcessingInstructionEnd
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    // After parsing a name to the end of the buffer, when we start
-    // parsing again, we need to allow the first character to be a
-    // non-start-char.
-    #[test]
-    fn names_that_span_blocks_can_continue_with_non_start_chars() -> Result {
-        block_on(async {
-            let tokens = Parser::new_from_str_and_min_capacity(r#"<a----------------/>"#)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Partial("a--------------")),
-                    ElementOpenStart(Complete("--")),
-                    ElementSelfClose,
-                ],
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn multi_byte_lookahead_at_end_of_input() -> Result {
-        block_on(async {
-            // Parser looked for `<?`, which didn't fit and since
-            // we ran out of input, we got an error.
-            let input = " ";
-
-            let tokens = Parser::new_from_str_and_min_capacity(input)
-                .collect_owned()
-                .await?;
-
-            use {Streaming::*, Token::*};
-            assert_eq!(tokens, [Space(Complete(" "))]);
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn fail_non_utf_8() -> Result {
-        block_on(async {
-            let error = Parser::new_from_bytes(&[b'a', b'b', b'c', 0xFF])
-                .collect_owned()
-                .await;
-
-            assert_error!(
-                error,
-                Error::InputNotUtf8 {
-                    location: 3,
-                    length: 1,
-                }
-            );
-
-            Ok(())
-        })
-    }
-
-    impl<'a> Parser<ReadAdapter<&'a [u8]>> {
-        fn new_from_str(s: &'a str) -> Self {
-            Self::new_from_str_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::DEFAULT_CAPACITY)
-        }
-
-        fn new_from_str_and_min_capacity(s: &'a str) -> Self {
-            Self::new_from_str_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::MINIMUM_CAPACITY)
-        }
-
-        fn new_from_str_and_capacity(s: &'a str, capacity: usize) -> Self {
-            let src = ReadAdapter::new(s.as_bytes());
-            Parser::with_buffer_capacity(src, capacity)
-        }
-
-        fn new_from_bytes(s: &'a [u8]) -> Self {
-            Self::new_from_bytes_and_capacity(s, StringRing::<ReadAdapter<&[u8]>>::DEFAULT_CAPACITY)
-        }
-
-        fn new_from_bytes_and_capacity(s: &'a [u8], capacity: usize) -> Self {
-            let src = ReadAdapter::new(s);
-            Parser::with_buffer_capacity(src, capacity)
-        }
-    }
-
     macro_rules! mirror_owned_token {
         (
             $(#[$meta:meta])*
-            enum $e_name:ident {
+            $vis:vis enum $e_name:ident {
                 $($v_name:ident $(($field:ty))?,)*
             }
         ) => {
 
             $(#[$meta])*
-            enum $e_name {
+            $vis enum $e_name {
                 $($v_name $(($field))? ,)*
             }
 
@@ -1325,7 +854,7 @@ mod test {
     mirror_owned_token! {
         /// Owns all the string data to avoid keeping references alive
         #[derive(Debug, Clone, PartialEq, Eq)]
-        enum OwnedToken {
+        pub(crate) enum OwnedToken {
             DeclarationStart(Streaming<String>),
             DeclarationClose,
 
@@ -1344,21 +873,6 @@ mod test {
             ProcessingInstructionStart(Streaming<String>),
             ProcessingInstructionValue(Streaming<String>),
             ProcessingInstructionEnd,
-        }
-    }
-
-    #[ext]
-    #[async_trait(?Send)]
-    impl<T> T
-    where
-        Self: TokenSource,
-    {
-        async fn collect_owned(&mut self) -> super::Result<Vec<OwnedToken>> {
-            let mut v = vec![];
-            while let Some(t) = self.next().await {
-                v.push(t?.into());
-            }
-            Ok(v)
         }
     }
 }
