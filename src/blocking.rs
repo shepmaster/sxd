@@ -357,6 +357,23 @@ mod test {
     }
 
     #[test]
+    fn processing_instruction_starts_with_xml() -> Result {
+        let tokens = Parser::new_from_str("<?xml-but-not-that?>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Partial("xml")),
+                ProcessingInstructionStart(Complete("-but-not-that")),
+                ProcessingInstructionEnd,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn processing_instruction_with_value() -> Result {
         let tokens = Parser::new_from_str("<?a b?>").collect_owned()?;
 
