@@ -224,21 +224,15 @@ where
     async fn char_data(&mut self) -> Result<Option<usize>> {
         let s = self.some_str().await?;
 
-        let end = s
-            .char_indices()
-            .take_while(|&(_, c)| c != '<' && c != '&')
-            .last()
-            .map(|(i, c)| i + c.len_utf8());
+        let offset = match s.find(&['<', '&'][..]) {
+            Some(0) => return Ok(None),
+            Some(offset) => offset,
+            None => s.len(),
+        };
+        // TODO: This probably doesn't work at a buffer boundary
+        let offset = s[..offset].find("]]>").unwrap_or(offset);
 
-        match end {
-            Some(0) => Ok(None),
-            Some(offset) => {
-                // TODO: This probably doesn't work at a buffer boundary
-                let offset = s[..offset].find("]]>").unwrap_or(offset);
-                Ok(Some(offset))
-            }
-            None => Ok(None),
-        }
+        Ok(Some(offset))
     }
 
     async fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
