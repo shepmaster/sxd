@@ -343,6 +343,7 @@ where
 
 #[ext]
 impl char {
+    #[inline]
     fn is_space(self) -> bool {
         match self {
             '\u{20}' | '\u{9}' | '\u{D}' | '\u{A}' => true,
@@ -350,13 +351,22 @@ impl char {
         }
     }
 
-    fn is_name_start_char(self) -> bool {
+    #[inline]
+    fn is_name_start_char_ascii(self) -> bool {
         match self {
-            ':'
-            | 'A'..='Z'
-            | '_'
-            | 'a'..='z'
-            | '\u{C0}'..='\u{D6}'
+            ':' | 'A'..='Z' | '_' | 'a'..='z' => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    fn is_name_start_char(self) -> bool {
+        if self.is_name_start_char_ascii() {
+            return true;
+        }
+
+        match self {
+            '\u{C0}'..='\u{D6}'
             | '\u{D8}'..='\u{F6}'
             | '\u{F8}'..='\u{2FF}'
             | '\u{370}'..='\u{37D}'
@@ -372,18 +382,30 @@ impl char {
         }
     }
 
+    #[inline]
+    fn is_name_char_ascii(self) -> bool {
+        if self.is_name_start_char_ascii() {
+            return true;
+        }
+
+        match self {
+            '-' | '.' | '0'..='9' => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
     fn is_name_char(self) -> bool {
+        if self.is_name_char_ascii() {
+            return true;
+        }
+
         if self.is_name_start_char() {
             return true;
         }
 
         match self {
-            '-'
-            | '.'
-            | '0'..='9'
-            | '\u{B7}'
-            | '\u{0300}'..='\u{036F}'
-            | '\u{203F}'..='\u{2040}' => true,
+            '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}' => true,
             _ => false,
         }
     }
