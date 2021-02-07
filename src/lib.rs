@@ -308,8 +308,8 @@ where
 
         let end_idx = c
             .take_while(|(_, c)| c.is_name_char())
-            .map(|(i, c)| i + c.len_utf8())
             .last()
+            .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(end_idx);
 
         if end_idx == s.len() {
@@ -326,8 +326,8 @@ where
 
         let end_idx = match c
             .take_while(|(_, c)| c.is_name_char())
-            .map(|(i, c)| i + c.len_utf8())
             .last()
+            .map(|(i, c)| i + c.len_utf8())
         {
             Some(i) => i,
             None => return Ok(Streaming::Complete("")),
