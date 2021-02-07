@@ -155,8 +155,11 @@ where
     }
 
     fn advance(&mut self, n_bytes: usize) {
+        assert!(n_bytes <= self.n_utf8_bytes);
+        assert!(self.as_str().is_char_boundary(n_bytes));
+
         self.n_offset_bytes += n_bytes;
-        self.n_utf8_bytes = self.n_utf8_bytes.saturating_sub(n_bytes);
+        self.n_utf8_bytes -= n_bytes;
     }
 
     async fn consume(&mut self, s: impl AsRef<str>) -> Result<MustUse<bool>> {
@@ -582,7 +585,6 @@ where
         self.buffer.require("?>").await?;
 
         self.state = Initial;
-        self.to_advance = 2;
         Ok(Some(DeclarationClose))
     }
 
