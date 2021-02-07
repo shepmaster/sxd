@@ -399,6 +399,33 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    fn comment() -> Result {
+        let tokens = Parser::new_from_str("<!-- hello -->").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [Comment(Complete(" hello "))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn comment_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("<!--aaaaaaaaaaaaaaaaaaaa-->").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                Comment(Partial("aaaaaaaaaaaa")),
+                Comment(Complete("aaaaaaaa")),
+            ]
+        );
+
+        Ok(())
+    }
+
     // After parsing a name to the end of the buffer, when we start
     // parsing again, we need to allow the first character to be a
     // non-start-char.
@@ -452,6 +479,15 @@ mod test {
                 ProcessingInstructionEnd,
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_comments_disallow_double_hyphens() -> Result {
+        let error = Parser::new_from_str("<!------>").collect_owned();
+
+        assert_error!(error, Error::DoubleHyphenInComment { location: 4 });
 
         Ok(())
     }

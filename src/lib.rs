@@ -178,17 +178,21 @@ where
         }
     }
 
-    async fn require(&mut self, s: impl AsRef<str>) -> Result<()> {
-        let s = s.as_ref();
+    async fn require_or_else(&mut self, s: &str, e: impl FnOnce(usize) -> Error) -> Result<()> {
+        if *self.consume(s).await? {
+            Ok(())
+        } else {
+            Err(e(self.absolute_location()))
+        }
+    }
 
-        ensure!(
-            *self.consume(s).await?,
-            RequiredTokenMissing {
-                token: s,
-                location: self.absolute_location(),
-            }
-        );
-        Ok(())
+    async fn require(&mut self, s: impl AsRef<str>) -> Result<()> {
+        let token = s.as_ref();
+
+        self.require_or_else(token, |location| {
+            RequiredTokenMissing { token, location }.build()
+        })
+        .await
     }
 
     async fn require_quote(&mut self) -> Result<Quote> {
@@ -242,6 +246,18 @@ where
             Some(offset) => Ok(Streaming::Complete(&s[..offset])),
             None => {
                 let s = s.strip_suffix('?').unwrap_or(s);
+                Ok(Streaming::Partial(s))
+            }
+        }
+    }
+
+    async fn comment(&mut self) -> Result<Streaming<&str>> {
+        let s = self.min_str(2).await?;
+
+        match s.find("--") {
+            Some(offset) => Ok(Streaming::Complete(&s[..offset])),
+            None => {
+                let s = s.strip_suffix('-').unwrap_or(s);
                 Ok(Streaming::Partial(s))
             }
         }
@@ -392,6 +408,9 @@ enum State {
     AfterProcessingInstructionName,
     StreamProcessingInstructionValue,
     AfterProcessingInstructionValue,
+
+    StreamComment,
+    AfterComment,
 }
 
 #[derive(Debug, Copy, Clone, Eq)]
@@ -494,6 +513,9 @@ pub enum Token<'a> {
     ProcessingInstructionValue(Streaming<&'a str>),
     /// `?>`
     ProcessingInstructionEnd,
+
+    /// `<!--a-->`
+    Comment(Streaming<&'a str>),
 }
 
 // TODO: Should we replace this with generics? We always know exactly
@@ -573,6 +595,9 @@ where
             AfterProcessingInstructionValue => {
                 self.dispatch_after_processing_instruction_value().await
             }
+
+            StreamComment => self.dispatch_stream_comment().await,
+            AfterComment => self.dispatch_after_comment().await,
         }
         .transpose()
     }
@@ -582,6 +607,9 @@ where
 
         if self.buffer.complete().await? {
             Ok(None)
+        } else if *self.buffer.consume("<!--").await? {
+            self.state = StreamComment;
+            self.dispatch_stream_comment().await
         } else if *self.buffer.consume("<?").await? {
             if *self.buffer.consume("xml").await? {
                 let n_space = self.buffer.consume_space().await?;
@@ -786,6 +814,30 @@ where
         Ok(Some(ProcessingInstructionEnd))
     }
 
+    async fn dispatch_stream_comment(&mut self) -> Result<Option<Token<'_>>> {
+        use {State::*, Token::*};
+
+        let value = self.buffer.comment().await?;
+        self.to_advance = value.unify().len();
+
+        if value.is_complete() {
+            self.state = AfterComment;
+        }
+
+        Ok(Some(Comment(value)))
+    }
+
+    async fn dispatch_after_comment(&mut self) -> Result<Option<Token<'_>>> {
+        use State::*;
+
+        self.buffer
+            .require_or_else("-->", |location| DoubleHyphenInComment { location }.build())
+            .await?;
+
+        self.state = Initial;
+        self.dispatch_initial().await
+    }
+
     // ----------
 
     async fn stream_name<'a>(
@@ -856,6 +908,11 @@ pub enum Error {
         location,
     ))]
     ExpectedSingleOrDoubleQuote {
+        location: usize,
+    },
+
+    #[snafu(display("A double hyphen is inside a comment at byte {}", location,))]
+    DoubleHyphenInComment {
         location: usize,
     },
 
@@ -939,6 +996,8 @@ mod test {
             ProcessingInstructionStart(Streaming<String>),
             ProcessingInstructionValue(Streaming<String>),
             ProcessingInstructionEnd,
+
+            Comment(Streaming<String>),
         }
     }
 }
