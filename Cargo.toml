@@ -14,9 +14,22 @@ members = [
     "dump",
 ]
 
+
 [dependencies]
 async-trait = "0.1.42"
 snafu = "0.6.10"
 easy-ext = "0.2.6"
 itertools = "0.10.0"
 futures = "0.3.12"
+
+[dev-dependencies]
+iai = "0.1.1"
+criterion = "0.3.4"
+
+[[bench]]
+name = "benchmark_iai"
+harness = false
+
+[[bench]]
+name = "benchmark_criterion"
+harness = false
