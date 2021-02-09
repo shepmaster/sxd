@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
-use std::{mem, str};
+use std::{future::Future, mem, str};
 
 #[macro_use]
 mod macros;
@@ -550,14 +550,6 @@ pub enum Token<'a> {
     Comment(Streaming<&'a str>),
 }
 
-// TODO: Should we replace this with generics? We always know exactly
-// what to do at compile time.
-#[derive(Debug)]
-enum NameKind {
-    Start,
-    Continue,
-}
-
 #[derive(Debug)]
 pub struct Parser<S> {
     buffer: StringRing<S>,
@@ -596,26 +588,26 @@ where
             AfterDeclarationVersion => self.dispatch_after_declaration_version().await,
 
             StreamElementOpenName => {
-                self.dispatch_stream_element_open_name(NameKind::Continue)
+                self.dispatch_stream_element_open_name(StringRing::name_continuation)
                     .await
             }
             AfterElementOpenName => self.dispatch_after_element_open_name().await,
 
             StreamAttributeName => {
-                self.dispatch_stream_attribute_name(NameKind::Continue)
+                self.dispatch_stream_attribute_name(StringRing::name_continuation)
                     .await
             }
             AfterAttributeName => self.dispatch_after_attribute_name().await,
             StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote).await,
 
             StreamElementCloseName => {
-                self.dispatch_stream_element_close_name(NameKind::Continue)
+                self.dispatch_stream_element_close_name(StringRing::name_continuation)
                     .await
             }
             AfterElementCloseName => self.dispatch_after_element_close_name().await,
 
             StreamReferenceNamed => {
-                self.dispatch_stream_reference_named(NameKind::Continue)
+                self.dispatch_stream_reference_named(StringRing::name_continuation)
                     .await
             }
             StreamReferenceDecimal => self.dispatch_stream_reference_decimal().await,
@@ -623,7 +615,7 @@ where
             AfterReference => self.dispatch_after_reference().await,
 
             StreamProcessingInstructionName => {
-                self.dispatch_stream_processing_instruction_name(NameKind::Continue)
+                self.dispatch_stream_processing_instruction_name(StringRing::name_continuation)
                     .await
             }
             AfterProcessingInstructionName => {
@@ -670,16 +662,16 @@ where
                 }
             } else {
                 self.state = StreamProcessingInstructionName;
-                self.dispatch_stream_processing_instruction_name(NameKind::Start)
+                self.dispatch_stream_processing_instruction_name(StringRing::name)
                     .await
             }
         } else if *self.buffer.consume("</").await? {
             self.state = StreamElementCloseName;
-            self.dispatch_stream_element_close_name(NameKind::Start)
+            self.dispatch_stream_element_close_name(StringRing::name)
                 .await
         } else if *self.buffer.consume("<").await? {
             self.state = StreamElementOpenName;
-            self.dispatch_stream_element_open_name(NameKind::Start)
+            self.dispatch_stream_element_open_name(StringRing::name)
                 .await
         } else if *self.buffer.consume("&#x").await? {
             self.state = StreamReferenceHex;
@@ -689,7 +681,7 @@ where
             self.dispatch_stream_reference_decimal().await
         } else if *self.buffer.consume("&").await? {
             self.state = StreamReferenceNamed;
-            self.dispatch_stream_reference_named(NameKind::Start).await
+            self.dispatch_stream_reference_named(StringRing::name).await
         } else if let Some(l) = self.buffer.space().await? {
             self.to_advance = l;
             let s = &self.buffer.as_str()[..l];
@@ -733,23 +725,25 @@ where
         Ok(Some(DeclarationStart(value)))
     }
 
-    async fn dispatch_stream_element_open_name(
-        &mut self,
-        name_kind: NameKind,
-    ) -> Result<Option<Token<'_>>> {
-        self.stream_name(
-            name_kind,
-            State::AfterElementOpenName,
-            Token::ElementOpenStart,
-        )
-        .await
+    async fn dispatch_stream_element_open_name<'a, Fut>(
+        &'a mut self,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+    ) -> Result<Option<Token<'a>>>
+    where
+        Fut: Future<Output = Result<Streaming<&'a str>>>,
+    {
+        self.stream_from_buffer(f, State::AfterElementOpenName, Token::ElementOpenStart)
+            .await
     }
 
-    async fn dispatch_stream_element_close_name(
-        &mut self,
-        name_kind: NameKind,
-    ) -> Result<Option<Token<'_>>> {
-        self.stream_name(name_kind, State::AfterElementCloseName, Token::ElementClose)
+    async fn dispatch_stream_element_close_name<'a, Fut>(
+        &'a mut self,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+    ) -> Result<Option<Token<'a>>>
+    where
+        Fut: Future<Output = Result<Streaming<&'a str>>>,
+    {
+        self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
             .await
     }
 
@@ -766,15 +760,18 @@ where
             Ok(Some(ElementOpenEnd))
         } else {
             self.state = StreamAttributeName;
-            self.dispatch_stream_attribute_name(NameKind::Start).await
+            self.dispatch_stream_attribute_name(StringRing::name).await
         }
     }
 
-    async fn dispatch_stream_attribute_name(
-        &mut self,
-        name_kind: NameKind,
-    ) -> Result<Option<Token<'_>>> {
-        self.stream_name(name_kind, State::AfterAttributeName, Token::AttributeName)
+    async fn dispatch_stream_attribute_name<'a, Fut>(
+        &'a mut self,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+    ) -> Result<Option<Token<'a>>>
+    where
+        Fut: Future<Output = Result<Streaming<&'a str>>>,
+    {
+        self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeName)
             .await
     }
 
@@ -815,16 +812,19 @@ where
         self.dispatch_initial().await
     }
 
-    async fn dispatch_stream_reference_named(
-        &mut self,
-        name_kind: NameKind,
-    ) -> Result<Option<Token<'_>>> {
-        self.stream_name(name_kind, State::AfterReference, Token::ReferenceNamed)
+    async fn dispatch_stream_reference_named<'a, Fut>(
+        &'a mut self,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+    ) -> Result<Option<Token<'a>>>
+    where
+        Fut: Future<Output = Result<Streaming<&'a str>>>,
+    {
+        self.stream_from_buffer(f, State::AfterReference, Token::ReferenceNamed)
             .await
     }
 
     async fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_simple(
+        self.stream_from_buffer(
             StringRing::reference_decimal,
             State::AfterReference,
             Token::ReferenceDecimal,
@@ -833,7 +833,7 @@ where
     }
 
     async fn dispatch_stream_reference_hex(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_simple(
+        self.stream_from_buffer(
             StringRing::reference_hex,
             State::AfterReference,
             Token::ReferenceHex,
@@ -849,12 +849,15 @@ where
         self.dispatch_initial().await
     }
 
-    async fn dispatch_stream_processing_instruction_name(
-        &mut self,
-        name_kind: NameKind,
-    ) -> Result<Option<Token<'_>>> {
-        self.stream_name(
-            name_kind,
+    async fn dispatch_stream_processing_instruction_name<'a, Fut>(
+        &'a mut self,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+    ) -> Result<Option<Token<'a>>>
+    where
+        Fut: Future<Output = Result<Streaming<&'a str>>>,
+    {
+        self.stream_from_buffer(
+            f,
             State::AfterProcessingInstructionName,
             Token::ProcessingInstructionStart,
         )
@@ -876,7 +879,7 @@ where
     }
 
     async fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_simple(
+        self.stream_from_buffer(
             StringRing::processing_instruction_value,
             State::AfterProcessingInstructionValue,
             Token::ProcessingInstructionValue,
@@ -894,7 +897,7 @@ where
     }
 
     async fn dispatch_stream_comment(&mut self) -> Result<Option<Token<'_>>> {
-        self.stream_simple(StringRing::comment, State::AfterComment, Token::Comment)
+        self.stream_from_buffer(StringRing::comment, State::AfterComment, Token::Comment)
             .await
     }
 
@@ -912,14 +915,14 @@ where
     // ----------
 
     #[inline]
-    async fn stream_simple<'a, Fut>(
+    async fn stream_from_buffer<'a, Fut>(
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
         next_state: State,
         create: impl FnOnce(Streaming<&'a str>) -> Token<'a>,
     ) -> Result<Option<Token<'a>>>
     where
-        Fut: std::future::Future<Output = Result<Streaming<&'a str>>>,
+        Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
         let value = f(&mut self.buffer).await?;
         self.to_advance = value.unify().len();
@@ -929,26 +932,6 @@ where
         }
 
         Ok(Some(create(value)))
-    }
-
-    #[inline]
-    async fn stream_name<'a>(
-        &'a mut self,
-        name_kind: NameKind,
-        next_state: State,
-        create: impl FnOnce(Streaming<&'a str>) -> Token<'a>,
-    ) -> Result<Option<Token<'_>>> {
-        let name = match name_kind {
-            NameKind::Start => self.buffer.name().await?,
-            NameKind::Continue => self.buffer.name_continuation().await?,
-        };
-
-        self.to_advance = name.unify().len();
-
-        if name.is_complete() {
-            self.state = next_state;
-        }
-        Ok(Some(create(name)))
     }
 }
 
