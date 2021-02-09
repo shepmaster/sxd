@@ -426,6 +426,87 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    fn reference_named() -> Result {
+        let tokens = Parser::new_from_str("&lt;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ReferenceNamed(Complete("lt"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_named_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("&aaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ReferenceNamed(Partial("aaaaaaaaaaaaaaa")),
+                ReferenceNamed(Complete("aaaaa")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_decimal() -> Result {
+        let tokens = Parser::new_from_str("&#42;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ReferenceDecimal(Complete("42"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_decimal_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("&#11111111111111111111;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ReferenceDecimal(Partial("11111111111111")),
+                ReferenceDecimal(Complete("111111")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_hex() -> Result {
+        let tokens = Parser::new_from_str("&#xBEEF;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ReferenceHex(Complete("BEEF"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_hex_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("&#xaaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ReferenceHex(Partial("aaaaaaaaaaaaa")),
+                ReferenceHex(Complete("aaaaaaa")),
+            ]
+        );
+
+        Ok(())
+    }
+
     // After parsing a name to the end of the buffer, when we start
     // parsing again, we need to allow the first character to be a
     // non-start-char.

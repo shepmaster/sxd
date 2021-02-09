@@ -261,17 +261,9 @@ where
 
     async fn space(&mut self) -> Result<Option<usize>> {
         let s = self.some_str().await?;
-
-        let space = s
-            .char_indices()
-            .take_while(|(_, c)| c.is_space())
-            .last()
-            .map(|(i, c)| i + c.len_utf8());
-
-        match space {
-            Some(0) => Ok(None),
-            Some(space) => Ok(Some(space)),
-            None => Ok(None),
+        match matching_bytes(s, char::is_space) {
+            0 => Ok(None),
+            len => Ok(Some(len)),
         }
     }
 
@@ -284,6 +276,14 @@ where
         }
 
         Ok(total)
+    }
+
+    async fn reference_decimal(&mut self) -> Result<Streaming<&str>> {
+        self.while_char(char::is_ascii_digit).await
+    }
+
+    async fn reference_hex(&mut self) -> Result<Streaming<&str>> {
+        self.while_char(char::is_ascii_hexdigit).await
     }
 
     async fn name(&mut self) -> Result<Streaming<&str>> {
@@ -314,31 +314,33 @@ where
     }
 
     async fn name_continuation(&mut self) -> Result<Streaming<&str>> {
+        self.while_char(char::is_name_char).await
+    }
+
+    #[inline]
+    async fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<&str>> {
         let s = self.some_str().await?;
 
-        let c = s.char_indices();
-
-        let end_idx = match c
-            .take_while(|(_, c)| c.is_name_char())
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-        {
-            Some(i) => i,
-            None => return Ok(Streaming::Complete("")),
-        };
-
-        if end_idx == s.len() {
-            Ok(Streaming::Partial(s))
-        } else {
-            Ok(Streaming::Complete(&s[..end_idx]))
+        match matching_bytes(s, predicate) {
+            offset if offset == s.len() => Ok(Streaming::Partial(s)),
+            offset => Ok(Streaming::Complete(&s[..offset])),
         }
     }
+}
+
+#[inline]
+fn matching_bytes(s: &str, predicate: impl Fn(&char) -> bool) -> usize {
+    s.char_indices()
+        .take_while(|(_, c)| predicate(c))
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0)
 }
 
 #[ext]
 impl char {
     #[inline]
-    fn is_space(self) -> bool {
+    fn is_space(&self) -> bool {
         match self {
             '\u{20}' | '\u{9}' | '\u{D}' | '\u{A}' => true,
             _ => false,
@@ -377,7 +379,7 @@ impl char {
     }
 
     #[inline]
-    fn is_name_char_ascii(self) -> bool {
+    fn is_name_char_ascii(&self) -> bool {
         if self.is_name_start_char_ascii() {
             return true;
         }
@@ -389,7 +391,7 @@ impl char {
     }
 
     #[inline]
-    fn is_name_char(self) -> bool {
+    fn is_name_char(&self) -> bool {
         if self.is_name_char_ascii() {
             return true;
         }
@@ -421,6 +423,11 @@ enum State {
 
     StreamElementCloseName,
     AfterElementCloseName,
+
+    StreamReferenceNamed,
+    StreamReferenceDecimal,
+    StreamReferenceHex,
+    AfterReference,
 
     StreamProcessingInstructionName,
     AfterProcessingInstructionName,
@@ -525,6 +532,13 @@ pub enum Token<'a> {
     CharData(Streaming<&'a str>),
     Space(Streaming<&'a str>),
 
+    /// &lt;
+    ReferenceNamed(Streaming<&'a str>),
+    /// &#4242;
+    ReferenceDecimal(Streaming<&'a str>),
+    /// &#xABCD;
+    ReferenceHex(Streaming<&'a str>),
+
     /// `<?a`
     ProcessingInstructionStart(Streaming<&'a str>),
     /// `b`
@@ -600,6 +614,14 @@ where
             }
             AfterElementCloseName => self.dispatch_after_element_close_name().await,
 
+            StreamReferenceNamed => {
+                self.dispatch_stream_reference_named(NameKind::Continue)
+                    .await
+            }
+            StreamReferenceDecimal => self.dispatch_stream_reference_decimal().await,
+            StreamReferenceHex => self.dispatch_stream_reference_hex().await,
+            AfterReference => self.dispatch_after_reference().await,
+
             StreamProcessingInstructionName => {
                 self.dispatch_stream_processing_instruction_name(NameKind::Continue)
                     .await
@@ -659,6 +681,15 @@ where
             self.state = StreamElementOpenName;
             self.dispatch_stream_element_open_name(NameKind::Start)
                 .await
+        } else if *self.buffer.consume("&#x").await? {
+            self.state = StreamReferenceHex;
+            self.dispatch_stream_reference_hex().await
+        } else if *self.buffer.consume("&#").await? {
+            self.state = StreamReferenceDecimal;
+            self.dispatch_stream_reference_decimal().await
+        } else if *self.buffer.consume("&").await? {
+            self.state = StreamReferenceNamed;
+            self.dispatch_stream_reference_named(NameKind::Start).await
         } else if let Some(l) = self.buffer.space().await? {
             self.to_advance = l;
             let s = &self.buffer.as_str()[..l];
@@ -784,6 +815,40 @@ where
         self.dispatch_initial().await
     }
 
+    async fn dispatch_stream_reference_named(
+        &mut self,
+        name_kind: NameKind,
+    ) -> Result<Option<Token<'_>>> {
+        self.stream_name(name_kind, State::AfterReference, Token::ReferenceNamed)
+            .await
+    }
+
+    async fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<Token<'_>>> {
+        self.stream_simple(
+            StringRing::reference_decimal,
+            State::AfterReference,
+            Token::ReferenceDecimal,
+        )
+        .await
+    }
+
+    async fn dispatch_stream_reference_hex(&mut self) -> Result<Option<Token<'_>>> {
+        self.stream_simple(
+            StringRing::reference_hex,
+            State::AfterReference,
+            Token::ReferenceHex,
+        )
+        .await
+    }
+
+    async fn dispatch_after_reference(&mut self) -> Result<Option<Token<'_>>> {
+        use State::*;
+
+        self.buffer.require(";").await?;
+        self.state = Initial;
+        self.dispatch_initial().await
+    }
+
     async fn dispatch_stream_processing_instruction_name(
         &mut self,
         name_kind: NameKind,
@@ -811,16 +876,12 @@ where
     }
 
     async fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
-        use {State::*, Token::*};
-
-        let value = self.buffer.processing_instruction_value().await?;
-        self.to_advance = value.unify().len();
-
-        if value.is_complete() {
-            self.state = AfterProcessingInstructionValue;
-        }
-
-        Ok(Some(ProcessingInstructionValue(value)))
+        self.stream_simple(
+            StringRing::processing_instruction_value,
+            State::AfterProcessingInstructionValue,
+            Token::ProcessingInstructionValue,
+        )
+        .await
     }
 
     async fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
@@ -833,16 +894,8 @@ where
     }
 
     async fn dispatch_stream_comment(&mut self) -> Result<Option<Token<'_>>> {
-        use {State::*, Token::*};
-
-        let value = self.buffer.comment().await?;
-        self.to_advance = value.unify().len();
-
-        if value.is_complete() {
-            self.state = AfterComment;
-        }
-
-        Ok(Some(Comment(value)))
+        self.stream_simple(StringRing::comment, State::AfterComment, Token::Comment)
+            .await
     }
 
     async fn dispatch_after_comment(&mut self) -> Result<Option<Token<'_>>> {
@@ -858,6 +911,27 @@ where
 
     // ----------
 
+    #[inline]
+    async fn stream_simple<'a, Fut>(
+        &'a mut self,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+        next_state: State,
+        create: impl FnOnce(Streaming<&'a str>) -> Token<'a>,
+    ) -> Result<Option<Token<'a>>>
+    where
+        Fut: std::future::Future<Output = Result<Streaming<&'a str>>>,
+    {
+        let value = f(&mut self.buffer).await?;
+        self.to_advance = value.unify().len();
+
+        if value.is_complete() {
+            self.state = next_state;
+        }
+
+        Ok(Some(create(value)))
+    }
+
+    #[inline]
     async fn stream_name<'a>(
         &'a mut self,
         name_kind: NameKind,
@@ -1010,6 +1084,10 @@ mod test {
 
             CharData(Streaming<String>),
             Space(Streaming<String>),
+
+            ReferenceNamed(Streaming<String>),
+            ReferenceDecimal(Streaming<String>),
+            ReferenceHex(Streaming<String>),
 
             ProcessingInstructionStart(Streaming<String>),
             ProcessingInstructionValue(Streaming<String>),
