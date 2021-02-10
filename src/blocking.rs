@@ -264,6 +264,30 @@ mod test {
     }
 
     #[test]
+    fn cdata() -> Result {
+        let tokens = Parser::new_from_str("<![CDATA[ hello ]]>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [CData(Complete(" hello "))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cdata_small_buffer() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity("<![CDATA[aaaaaaaaaaaaaaaaaaaa]]>")
+            .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [CData(Partial("aaaaaaa")), CData(Complete("aaaaaaaaaaaaa"))]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn only_space() -> Result {
         let tokens = Parser::new_from_str(" \t\r\n").collect_owned()?;
 
@@ -543,7 +567,7 @@ mod test {
     }
 
     #[test]
-    fn multi_byte_lookahead_that_spans_blocks() -> Result {
+    fn multi_byte_processing_instruction_lookahead_that_spans_blocks() -> Result {
         // Parser looked for `?>`, which was split across the current
         // buffer and the next.
         let input = "<?a aaaaaaaaaaaaaaaaaaaaaaaaaaa?>";
@@ -577,6 +601,39 @@ mod test {
                 Comment(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
                 Comment(Complete("")),
             ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_cdata_lookahead_that_spans_blocks_1() -> Result {
+        let input = "<![CDATA[aaaaaaaaaaaaaaaaaaaaaa]]>";
+        //      this is the last byte in the buffer ^
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                CData(Partial("aaaaaaaaaaaaaaaaaaaaaa")),
+                CData(Complete("")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_cdata_lookahead_that_spans_blocks_2() -> Result {
+        let input = "<![CDATA[aaaaaaaaaaaaaaaaaaaaa]]>";
+        //      this is the last byte in the buffer ^
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [CData(Partial("aaaaaaaaaaaaaaaaaaaaa")), CData(Complete(""))],
         );
 
         Ok(())

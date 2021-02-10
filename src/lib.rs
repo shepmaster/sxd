@@ -235,6 +235,21 @@ where
         Ok(Some(offset))
     }
 
+    /// Anything that's not `]]>`
+    async fn cdata(&mut self) -> Result<Streaming<&str>> {
+        let s = self.min_str(3).await?;
+
+        match s.find("]]>") {
+            Some(offset) => return Ok(Streaming::Complete(&s[..offset])),
+            None => {
+                // Once for each `]`
+                let s = s.strip_suffix(']').unwrap_or(s);
+                let s = s.strip_suffix(']').unwrap_or(s);
+                Ok(Streaming::Partial(s))
+            }
+        }
+    }
+
     async fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
         let s = self.min_str(2).await?;
 
@@ -434,6 +449,9 @@ enum State {
     StreamProcessingInstructionValue,
     AfterProcessingInstructionValue,
 
+    StreamCData,
+    AfterCData,
+
     StreamComment,
     AfterComment,
 }
@@ -530,6 +548,8 @@ pub enum Token<'a> {
 
     /// `hello world`
     CharData(Streaming<&'a str>),
+    /// `<![CDATA[hello world]]>`
+    CData(Streaming<&'a str>),
     Space(Streaming<&'a str>),
 
     /// &lt;
@@ -606,6 +626,9 @@ where
             }
             AfterElementCloseName => self.dispatch_after_element_close_name().await,
 
+            StreamCData => self.dispatch_stream_cdata().await,
+            State::AfterCData => self.dispatch_after_cdata().await,
+
             StreamReferenceNamed => {
                 self.dispatch_stream_reference_named(StringRing::name_continuation)
                     .await
@@ -639,6 +662,9 @@ where
 
         if self.buffer.complete().await? {
             Ok(None)
+        } else if *self.buffer.consume("<![CDATA[").await? {
+            self.state = StreamCData;
+            self.dispatch_stream_cdata().await
         } else if *self.buffer.consume("<!--").await? {
             self.state = StreamComment;
             self.dispatch_stream_comment().await
@@ -896,6 +922,20 @@ where
         Ok(Some(ProcessingInstructionEnd))
     }
 
+    async fn dispatch_stream_cdata(&mut self) -> Result<Option<Token<'_>>> {
+        self.stream_from_buffer(StringRing::cdata, State::AfterCData, Token::CData)
+            .await
+    }
+
+    async fn dispatch_after_cdata(&mut self) -> Result<Option<Token<'_>>> {
+        use State::*;
+
+        self.buffer.require("]]>").await?;
+
+        self.state = Initial;
+        self.dispatch_initial().await
+    }
+
     async fn dispatch_stream_comment(&mut self) -> Result<Option<Token<'_>>> {
         self.stream_from_buffer(StringRing::comment, State::AfterComment, Token::Comment)
             .await
@@ -1066,6 +1106,7 @@ mod test {
             AttributeValue(Streaming<String>),
 
             CharData(Streaming<String>),
+            CData(Streaming<String>),
             Space(Streaming<String>),
 
             ReferenceNamed(Streaming<String>),
