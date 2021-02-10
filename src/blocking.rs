@@ -484,6 +484,24 @@ mod test {
     }
 
     #[test]
+    fn multi_byte_comment_lookahead_that_spans_blocks_1() -> Result {
+        let input = "<!--aaaaaaaaaaaaaaaaaaaaaaaaaaa-->";
+        //                         The last byte is ^
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                Comment(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                Comment(Complete("")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn fail_comments_disallow_double_hyphens() -> Result {
         let error = Parser::new_from_str("<!------>").collect_owned();
 

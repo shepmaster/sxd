@@ -206,6 +206,7 @@ where
         }
     }
 
+    /// Warning: This only works for single bytes!
     async fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<&str>> {
         let mut s = self.as_str();
         if s.is_empty() {
@@ -232,6 +233,7 @@ where
         match end {
             Some(0) => Ok(None),
             Some(offset) => {
+                // TODO: This probably doesn't work at a buffer boundary
                 let offset = s[..offset].find("]]>").unwrap_or(offset);
                 Ok(Some(offset))
             }
