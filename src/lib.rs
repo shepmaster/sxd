@@ -467,22 +467,21 @@ impl<T> Streaming<T> {
         matches!(self, Streaming::Complete(_))
     }
 
-    fn unify(&self) -> &T {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Streaming<U> {
+        use Streaming::*;
+
         match self {
-            Self::Partial(a) => a,
-            Self::Complete(a) => a,
+            Partial(v) => Partial(f(v)),
+            Complete(v) => Complete(f(v)),
         }
     }
-}
 
-impl<T> Streaming<&T>
-where
-    T: ToOwned + ?Sized,
-{
-    fn into_owned(self) -> Streaming<T::Owned> {
+    fn unify(&self) -> &T {
+        use Streaming::*;
+
         match self {
-            Streaming::Partial(v) => Streaming::Partial(v.to_owned()),
-            Streaming::Complete(v) => Streaming::Complete(v.to_owned()),
+            Partial(a) => a,
+            Complete(a) => a,
         }
     }
 }
@@ -524,51 +523,103 @@ impl AsRef<str> for Quote {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Token<'a> {
-    /// `<?xml version="1.9"`
-    DeclarationStart(Streaming<&'a str>),
-    /// `?>`
-    DeclarationClose,
+macro_rules! impl_token {
+    (
+        $(#[$o_meta:meta])*
+        $vis:vis enum $e_name:ident<$g:ident> {
+            $(
+                $(#[$i_meta:meta])*
+                $v_name:ident $(($field:ident))?
+            ,)*
+        }
+    ) => {
+        $(#[$o_meta])*
+        $vis enum $e_name<$g> {
+            $($(#[$i_meta])* $v_name $(($field))?,)*
+        }
 
-    /// `<foo`
-    ElementOpenStart(Streaming<&'a str>),
-    /// `>`
-    ElementOpenEnd,
-    /// `/>`
-    ElementSelfClose,
+        impl<$g> $e_name<$g> {
+            #[allow(non_snake_case)]
+            fn map<U>(self, f: impl FnOnce($g) -> U) ->  $e_name<U> {
+                use $e_name::*;
 
-    /// `</foo`
-    ElementClose(Streaming<&'a str>),
+                match self {
+                    $($v_name $(($field))? => $v_name $((f($field)))?, )*
+                }
+            }
+        }
 
-    /// `foo`
-    AttributeName(Streaming<&'a str>),
-    /// `="bar`
-    AttributeValue(Streaming<&'a str>),
+        impl<$g, U> PartialEq<$e_name<U>> for $e_name<$g>
+        where
+            $g: PartialEq<U>,
+        {
+            fn eq(&self, other: &$e_name<U>) -> bool {
+                use $e_name::*;
 
-    /// `hello world`
-    CharData(Streaming<&'a str>),
-    /// `<![CDATA[hello world]]>`
-    CData(Streaming<&'a str>),
-    Space(Streaming<&'a str>),
+                match (self, other) {
+                    $(impl_token!(@eq_pat s1 s2 $v_name $($field)?) =>
+                      impl_token!(@eq_arm s1 s2 $v_name $($field)?) ,)*
+                    _ => false,
+                }
+            }
+        }
+    };
 
-    /// &lt;
-    ReferenceNamed(Streaming<&'a str>),
-    /// &#4242;
-    ReferenceDecimal(Streaming<&'a str>),
-    /// &#xABCD;
-    ReferenceHex(Streaming<&'a str>),
-
-    /// `<?a`
-    ProcessingInstructionStart(Streaming<&'a str>),
-    /// `b`
-    ProcessingInstructionValue(Streaming<&'a str>),
-    /// `?>`
-    ProcessingInstructionEnd,
-
-    /// `<!--a-->`
-    Comment(Streaming<&'a str>),
+    (@eq_pat $s1:ident $s2:ident $v_name:ident $field:ty) => { ($v_name($s1), $v_name($s2)) };
+    (@eq_arm $s1:ident $s2:ident $v_name:ident $field:ty) => { $s1 == $s2 };
+    (@eq_pat $s1:ident $s2:ident $v_name:ident) => { ($v_name, $v_name) };
+    (@eq_arm $s1:ident $s2:ident $v_name:ident) => { true };
 }
+
+impl_token! {
+    #[derive(Debug, Copy, Clone, Eq)]
+    pub enum Token<T> {
+        /// `<?xml version="1.9"`
+        DeclarationStart(T),
+        /// `?>`
+        DeclarationClose,
+
+        /// `<foo`
+        ElementOpenStart(T),
+        /// `>`
+        ElementOpenEnd,
+        /// `/>`
+        ElementSelfClose,
+
+        /// `</foo`
+        ElementClose(T),
+
+        /// `foo`
+        AttributeName(T),
+        /// `="bar`
+        AttributeValue(T),
+
+        /// `hello world`
+        CharData(T),
+        /// `<![CDATA[hello world]]>`
+        CData(T),
+        Space(T),
+
+        /// &lt;
+        ReferenceNamed(T),
+        /// &#4242;
+        ReferenceDecimal(T),
+        /// &#xABCD;
+        ReferenceHex(T),
+
+        /// `<?a`
+        ProcessingInstructionStart(T),
+        /// `b`
+        ProcessingInstructionValue(T),
+        /// `?>`
+        ProcessingInstructionEnd,
+
+        /// `<!--a-->`
+        Comment(T),
+    }
+}
+
+type TokenS<'a> = Token<Streaming<&'a str>>;
 
 #[derive(Debug)]
 pub struct Parser<S> {
@@ -593,7 +644,7 @@ where
         }
     }
 
-    pub async fn next(&mut self) -> Option<Result<Token<'_>>> {
+    pub async fn next(&mut self) -> Option<Result<TokenS<'_>>> {
         use State::*;
 
         let to_advance = mem::take(&mut self.to_advance);
@@ -657,7 +708,7 @@ where
         .transpose()
     }
 
-    async fn dispatch_initial(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_initial(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         if self.buffer.complete().await? {
@@ -722,7 +773,7 @@ where
         }
     }
 
-    async fn dispatch_after_declaration_version(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_declaration_version(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         self.buffer.consume_space().await?;
@@ -736,7 +787,7 @@ where
     async fn dispatch_stream_declaration_version(
         &mut self,
         quote: Quote,
-    ) -> Result<Option<Token<'_>>> {
+    ) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         let value = self.buffer.consume_until(quote).await?;
@@ -754,7 +805,7 @@ where
     async fn dispatch_stream_element_open_name<'a, Fut>(
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<Token<'a>>>
+    ) -> Result<Option<TokenS<'a>>>
     where
         Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
@@ -765,7 +816,7 @@ where
     async fn dispatch_stream_element_close_name<'a, Fut>(
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<Token<'a>>>
+    ) -> Result<Option<TokenS<'a>>>
     where
         Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
@@ -773,7 +824,7 @@ where
             .await
     }
 
-    async fn dispatch_after_element_open_name(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_element_open_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         self.buffer.consume_space().await?;
@@ -793,7 +844,7 @@ where
     async fn dispatch_stream_attribute_name<'a, Fut>(
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<Token<'a>>>
+    ) -> Result<Option<TokenS<'a>>>
     where
         Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
@@ -801,7 +852,7 @@ where
             .await
     }
 
-    async fn dispatch_after_attribute_name(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_attribute_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
         self.buffer.consume_space().await?;
@@ -813,7 +864,10 @@ where
         self.dispatch_stream_attribute_value(quote).await
     }
 
-    async fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_attribute_value(
+        &mut self,
+        quote: Quote,
+    ) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         let value = self.buffer.consume_until(&quote).await?;
@@ -828,7 +882,7 @@ where
         Ok(Some(AttributeValue(value)))
     }
 
-    async fn dispatch_after_element_close_name(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_element_close_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
         self.buffer.consume_space().await?;
@@ -841,7 +895,7 @@ where
     async fn dispatch_stream_reference_named<'a, Fut>(
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<Token<'a>>>
+    ) -> Result<Option<TokenS<'a>>>
     where
         Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
@@ -849,7 +903,7 @@ where
             .await
     }
 
-    async fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(
             StringRing::reference_decimal,
             State::AfterReference,
@@ -858,7 +912,7 @@ where
         .await
     }
 
-    async fn dispatch_stream_reference_hex(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_reference_hex(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(
             StringRing::reference_hex,
             State::AfterReference,
@@ -867,7 +921,7 @@ where
         .await
     }
 
-    async fn dispatch_after_reference(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_reference(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
         self.buffer.require(";").await?;
@@ -878,7 +932,7 @@ where
     async fn dispatch_stream_processing_instruction_name<'a, Fut>(
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<Token<'a>>>
+    ) -> Result<Option<TokenS<'a>>>
     where
         Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
@@ -890,7 +944,7 @@ where
         .await
     }
 
-    async fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         self.buffer.consume_space().await?;
@@ -904,7 +958,7 @@ where
         }
     }
 
-    async fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(
             StringRing::processing_instruction_value,
             State::AfterProcessingInstructionValue,
@@ -913,7 +967,7 @@ where
         .await
     }
 
-    async fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
         self.buffer.require("?>").await?;
@@ -922,12 +976,12 @@ where
         Ok(Some(ProcessingInstructionEnd))
     }
 
-    async fn dispatch_stream_cdata(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(StringRing::cdata, State::AfterCData, Token::CData)
             .await
     }
 
-    async fn dispatch_after_cdata(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
         self.buffer.require("]]>").await?;
@@ -936,12 +990,12 @@ where
         self.dispatch_initial().await
     }
 
-    async fn dispatch_stream_comment(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_stream_comment(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(StringRing::comment, State::AfterComment, Token::Comment)
             .await
     }
 
-    async fn dispatch_after_comment(&mut self) -> Result<Option<Token<'_>>> {
+    async fn dispatch_after_comment(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
         self.buffer
@@ -959,8 +1013,8 @@ where
         &'a mut self,
         f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
         next_state: State,
-        create: impl FnOnce(Streaming<&'a str>) -> Token<'a>,
-    ) -> Result<Option<Token<'a>>>
+        create: impl FnOnce(Streaming<&'a str>) -> TokenS<'a>,
+    ) -> Result<Option<TokenS<'a>>>
     where
         Fut: Future<Output = Result<Streaming<&'a str>>>,
     {
@@ -1038,86 +1092,3 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
-
-    macro_rules! mirror_owned_token {
-        (
-            $(#[$meta:meta])*
-            $vis:vis enum $e_name:ident {
-                $($v_name:ident $(($field:ty))?,)*
-            }
-        ) => {
-
-            $(#[$meta])*
-            $vis enum $e_name {
-                $($v_name $(($field))? ,)*
-            }
-
-            impl From<Token<'_>> for $e_name {
-                fn from(other: Token<'_>) -> Self {
-                    match other {
-                        $(mirror_owned_token!(@from_pat s $v_name $($field)?) =>
-                          mirror_owned_token!(@from_arm s $v_name $($field)?) ,)*
-                    }
-                }
-            }
-
-            impl PartialEq<Token<'_>> for $e_name {
-                fn eq(&self, other: &Token<'_>) -> bool {
-                    match (self, other) {
-                        $(mirror_owned_token!(@eq_pat s1 s2 $v_name $($field)?) =>
-                          mirror_owned_token!(@eq_arm s1 s2 $v_name $($field)?) ,)*
-                        _ => false,
-                    }
-                }
-            }
-        };
-
-        (@from_pat $s:ident $v_name:ident $field:ty) => { Token::$v_name($s) };
-        (@from_arm $s:ident $v_name:ident $field:ty) => { Self::$v_name($s.into_owned()) };
-        (@from_pat $s:ident $v_name:ident) => { Token::$v_name };
-        (@from_arm $s:ident $v_name:ident) => { Self::$v_name };
-
-        (@eq_pat $s1:ident $s2:ident $v_name:ident $field:ty) => { (Self::$v_name($s1), Token::$v_name($s2)) };
-        (@eq_arm $s1:ident $s2:ident $v_name:ident $field:ty) => { $s1 == $s2 };
-        (@eq_pat $s1:ident $s2:ident $v_name:ident) => { (Self::$v_name, Token::$v_name) };
-        (@eq_arm $s1:ident $s2:ident $v_name:ident) => { true };
-    }
-
-    mirror_owned_token! {
-        /// Owns all the string data to avoid keeping references alive
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub(crate) enum OwnedToken {
-            DeclarationStart(Streaming<String>),
-            DeclarationClose,
-
-            ElementOpenStart(Streaming<String>),
-            ElementOpenEnd,
-            ElementSelfClose,
-
-            ElementClose(Streaming<String>),
-
-            AttributeName(Streaming<String>),
-            AttributeValue(Streaming<String>),
-
-            CharData(Streaming<String>),
-            CData(Streaming<String>),
-            Space(Streaming<String>),
-
-            ReferenceNamed(Streaming<String>),
-            ReferenceDecimal(Streaming<String>),
-            ReferenceHex(Streaming<String>),
-
-            ProcessingInstructionStart(Streaming<String>),
-            ProcessingInstructionValue(Streaming<String>),
-            ProcessingInstructionEnd,
-
-            Comment(Streaming<String>),
-        }
-    }
-}

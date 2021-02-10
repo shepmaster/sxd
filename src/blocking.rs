@@ -1,4 +1,4 @@
-use crate::{DataSource, Result, StringRing, Token};
+use crate::{DataSource, Result, Streaming, StringRing, Token};
 use async_trait::async_trait;
 use futures::executor;
 use std::io;
@@ -35,7 +35,7 @@ where
         Self(raw)
     }
 
-    pub fn next(&mut self) -> Option<Result<Token<'_>>> {
+    pub fn next(&mut self) -> Option<Result<Token<Streaming<&str>>>> {
         // TODO: Would implementing our own executor improve performance?
         executor::block_on(self.0.next())
     }
@@ -43,7 +43,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::{test::OwnedToken, Error, Streaming, StringRing, Token};
+    use crate::{Error, Streaming, StringRing, Token};
 
     use super::*;
 
@@ -689,10 +689,10 @@ mod test {
     where
         R: std::io::Read,
     {
-        fn collect_owned(&mut self) -> super::Result<Vec<OwnedToken>> {
+        fn collect_owned(&mut self) -> super::Result<Vec<Token<Streaming<String>>>> {
             let mut v = vec![];
             while let Some(t) = self.next() {
-                v.push(t?.into());
+                v.push(t?.map(|s| s.map(str::to_owned)));
             }
             Ok(v)
         }
