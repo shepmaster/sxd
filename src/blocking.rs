@@ -696,5 +696,100 @@ mod test {
             }
             Ok(v)
         }
+
+        fn collect_fused(&mut self) -> super::Result<Vec<Token<String>>> {
+            use std::mem;
+            use {Streaming::*, Token::*};
+
+            let mut vv = vec![];
+            let mut current: Option<Token<String>> = None;
+
+            while let Some(t) = self.next() {
+                let t = t?;
+
+                macro_rules! fuse_tokens {
+                    ($($vname:ident $(($field:ident))?,)*) => {
+                        match t {
+                            $(
+                                fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?)
+                            ,)*
+                        }
+                    };
+
+                    (@pat $vname:ident $field:ident) => { $vname($field) };
+                    (@arm $vname:ident $field:ident) => {
+                        match $field {
+                            Partial(x) => {
+                                match &mut current {
+                                    Some($vname(s)) => s.push_str(x),
+                                    Some(other) => {
+                                        let other = mem::replace(other, $vname(x.to_string()));
+                                        vv.push(other);
+                                    }
+                                    None => current = Some($vname(x.to_string())),
+                                }
+                            },
+                            Complete(x) => {
+                                match current.take() {
+                                    Some($vname(mut s)) => {
+                                        s.push_str(x);
+                                        vv.push($vname(s));
+                                    }
+                                    Some(other) => {
+                                        vv.push(other);
+                                        vv.push($vname(x.to_string()));
+                                    }
+                                    None => {
+                                        vv.push($vname(x.to_string()));
+                                    }
+                                }
+                            },
+                        }
+                    };
+
+                    (@pat $vname:ident) => { $vname };
+                    (@arm $vname:ident) => {
+                        match current.take() {
+                            Some(other) => {
+                                vv.push(other);
+                                vv.push($vname);
+                            }
+                            None => {
+                                vv.push($vname);
+                            }
+                        }
+                    };
+                }
+
+                fuse_tokens! {
+                    DeclarationStart(val),
+                    DeclarationClose,
+
+                    ElementOpenStart(val),
+                    ElementOpenEnd,
+                    ElementSelfClose,
+                    ElementClose(val),
+
+                    AttributeName(val),
+                    AttributeValue(val),
+
+                    CharData(val),
+                    CData(val),
+                    Space(val),
+
+                    ReferenceNamed(val),
+                    ReferenceDecimal(val),
+                    ReferenceHex(val),
+
+                    ProcessingInstructionStart(val),
+                    ProcessingInstructionValue(val),
+                    ProcessingInstructionEnd,
+
+                    Comment(val),
+                }
+            }
+
+            Ok(vv)
+        }
     }
 }
