@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::{self, BufWriter, Read, Write},
 };
-use sxd_pull_parser::blocking::Parser;
+use sxd_pull_parser::Parser;
 
 type Error = Box<dyn std::error::Error>;
 type Result<T = (), E = Error> = std::result::Result<T, E>;

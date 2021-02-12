@@ -16,10 +16,8 @@ members = [
 
 
 [dependencies]
-async-trait = "0.1.42"
 snafu = "0.6.10"
 easy-ext = "0.2.6"
-futures = "0.3.12"
 
 [dev-dependencies]
 iai = "0.1.1"

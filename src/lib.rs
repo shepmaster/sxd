@@ -1,20 +1,13 @@
 #![deny(rust_2018_idioms)]
 #![allow(dead_code)]
 
-use async_trait::async_trait;
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
-use std::{future::Future, mem, str};
+use std::io::Read;
+use std::{mem, str};
 
 #[macro_use]
 mod macros;
-
-pub mod blocking;
-
-#[async_trait(?Send)]
-pub trait DataSource {
-    async fn read(&mut self, buffer: &mut [u8]) -> usize;
-}
 
 #[derive(Debug)]
 struct StringRing<S> {
@@ -31,7 +24,7 @@ struct StringRing<S> {
 
 impl<S> StringRing<S>
 where
-    S: DataSource,
+    S: Read,
 {
     // The longest single token should be `standalone`, then round up
     // a bit.
@@ -70,22 +63,22 @@ where
         unsafe { str::from_utf8_unchecked(bytes) }
     }
 
-    async fn min_str(&mut self, len: usize) -> Result<&str> {
+    fn min_str(&mut self, len: usize) -> Result<&str> {
         if self.n_utf8_bytes < len {
-            abandon!(self.extend().await);
+            abandon!(self.extend());
         }
         Ok(self.as_str())
     }
 
-    async fn some_str(&mut self) -> Result<&str> {
-        self.min_str(1).await
+    fn some_str(&mut self) -> Result<&str> {
+        self.min_str(1)
     }
 
     fn absolute_location(&self) -> usize {
         self.n_retired_bytes + self.n_offset_bytes
     }
 
-    async fn extend(&mut self) -> Result<()> {
+    fn extend(&mut self) -> Result<()> {
         let mut buffer =
             &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][self.n_dangling_bytes..];
 
@@ -104,7 +97,7 @@ where
             "No room left to store data in buffer; buffer too small",
         );
 
-        let n_new_bytes = self.source.read(buffer).await;
+        let n_new_bytes = self.source.read(buffer).expect("todo");
         ensure!(n_new_bytes > 0, NoMoreInputAvailable);
 
         self.n_dangling_bytes += n_new_bytes;
@@ -133,22 +126,22 @@ where
         Ok(())
     }
 
-    async fn complete(&mut self) -> Result<bool> {
+    fn complete(&mut self) -> Result<bool> {
         if !self.as_str().is_empty() {
             return Ok(false);
         }
 
-        match self.extend().await {
+        match self.extend() {
             Ok(()) => Ok(self.as_str().is_empty()),
             Err(Error::NoMoreInputAvailable) => Ok(true),
             Err(e) => Err(e),
         }
     }
 
-    async fn starts_with(&mut self, needle: &str) -> Result<bool> {
+    fn starts_with(&mut self, needle: &str) -> Result<bool> {
         while self.n_utf8_bytes < needle.len() {
             // TODO: Avoid infinite loop
-            match self.extend().await {
+            match self.extend() {
                 Ok(_) => {}
                 Err(Error::NoMoreInputAvailable) => return Ok(false),
                 Err(e) => return Err(e),
@@ -167,10 +160,10 @@ where
         self.n_utf8_bytes -= n_bytes;
     }
 
-    async fn consume(&mut self, s: impl AsRef<str>) -> Result<MustUse<bool>> {
+    fn consume(&mut self, s: impl AsRef<str>) -> Result<MustUse<bool>> {
         let s = s.as_ref();
 
-        if abandon!(self.starts_with(s).await) {
+        if abandon!(self.starts_with(s)) {
             self.advance(s.len());
             Ok(MustUse(true))
         } else {
@@ -178,27 +171,26 @@ where
         }
     }
 
-    async fn require_or_else(&mut self, s: &str, e: impl FnOnce(usize) -> Error) -> Result<()> {
-        if *abandon!(self.consume(s).await) {
+    fn require_or_else(&mut self, s: &str, e: impl FnOnce(usize) -> Error) -> Result<()> {
+        if *abandon!(self.consume(s)) {
             Ok(())
         } else {
             Err(e(self.absolute_location()))
         }
     }
 
-    async fn require(&mut self, s: impl AsRef<str>) -> Result<()> {
+    fn require(&mut self, s: impl AsRef<str>) -> Result<()> {
         let token = s.as_ref();
 
         self.require_or_else(token, |location| {
             RequiredTokenMissing { token, location }.build()
         })
-        .await
     }
 
-    async fn require_quote(&mut self) -> Result<Quote> {
-        if *abandon!(self.consume(&Quote::Double).await) {
+    fn require_quote(&mut self) -> Result<Quote> {
+        if *abandon!(self.consume(&Quote::Double)) {
             Ok(Quote::Double)
-        } else if *abandon!(self.consume(&Quote::Single).await) {
+        } else if *abandon!(self.consume(&Quote::Single)) {
             Ok(Quote::Single)
         } else {
             let location = self.absolute_location();
@@ -207,10 +199,10 @@ where
     }
 
     /// Warning: This only works for single bytes!
-    async fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<&str>> {
+    fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<&str>> {
         let mut s = self.as_str();
         if s.is_empty() {
-            abandon!(self.extend().await);
+            abandon!(self.extend());
             s = self.as_str();
         }
 
@@ -221,8 +213,8 @@ where
     }
 
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
-    async fn char_data(&mut self) -> Result<Option<usize>> {
-        let s = abandon!(self.some_str().await);
+    fn char_data(&mut self) -> Result<Option<usize>> {
+        let s = abandon!(self.some_str());
 
         let offset = match s.find(&['<', '&'][..]) {
             Some(0) => return Ok(None),
@@ -236,8 +228,8 @@ where
     }
 
     /// Anything that's not `]]>`
-    async fn cdata(&mut self) -> Result<Streaming<&str>> {
-        let s = abandon!(self.min_str(3).await);
+    fn cdata(&mut self) -> Result<Streaming<&str>> {
+        let s = abandon!(self.min_str(3));
 
         match s.find("]]>") {
             Some(offset) => return Ok(Streaming::Complete(&s[..offset])),
@@ -250,8 +242,8 @@ where
         }
     }
 
-    async fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
-        let s = abandon!(self.min_str(2).await);
+    fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
+        let s = abandon!(self.min_str(2));
 
         match s.find("?>") {
             Some(offset) => Ok(Streaming::Complete(&s[..offset])),
@@ -262,8 +254,8 @@ where
         }
     }
 
-    async fn comment(&mut self) -> Result<Streaming<&str>> {
-        let s = abandon!(self.min_str(2).await);
+    fn comment(&mut self) -> Result<Streaming<&str>> {
+        let s = abandon!(self.min_str(2));
 
         match s.find("--") {
             Some(offset) => Ok(Streaming::Complete(&s[..offset])),
@@ -274,18 +266,18 @@ where
         }
     }
 
-    async fn space(&mut self) -> Result<Option<usize>> {
-        let s = abandon!(self.some_str().await);
+    fn space(&mut self) -> Result<Option<usize>> {
+        let s = abandon!(self.some_str());
         match matching_bytes(s, char::is_space) {
             0 => Ok(None),
             len => Ok(Some(len)),
         }
     }
 
-    async fn consume_space(&mut self) -> Result<usize> {
+    fn consume_space(&mut self) -> Result<usize> {
         let mut total = 0;
 
-        while let Some(len) = abandon!(self.space().await) {
+        while let Some(len) = abandon!(self.space()) {
             total += len;
             self.advance(len);
         }
@@ -293,16 +285,16 @@ where
         Ok(total)
     }
 
-    async fn reference_decimal(&mut self) -> Result<Streaming<&str>> {
-        self.while_char(char::is_ascii_digit).await
+    fn reference_decimal(&mut self) -> Result<Streaming<&str>> {
+        self.while_char(char::is_ascii_digit)
     }
 
-    async fn reference_hex(&mut self) -> Result<Streaming<&str>> {
-        self.while_char(char::is_ascii_hexdigit).await
+    fn reference_hex(&mut self) -> Result<Streaming<&str>> {
+        self.while_char(char::is_ascii_hexdigit)
     }
 
-    async fn name(&mut self) -> Result<Streaming<&str>> {
-        let s = abandon!(self.some_str().await);
+    fn name(&mut self) -> Result<Streaming<&str>> {
+        let s = abandon!(self.some_str());
 
         let mut c = s.char_indices();
 
@@ -328,13 +320,13 @@ where
         }
     }
 
-    async fn name_continuation(&mut self) -> Result<Streaming<&str>> {
-        self.while_char(char::is_name_char).await
+    fn name_continuation(&mut self) -> Result<Streaming<&str>> {
+        self.while_char(char::is_name_char)
     }
 
     #[inline]
-    async fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<&str>> {
-        let s = abandon!(self.some_str().await);
+    fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<&str>> {
+        let s = abandon!(self.some_str());
 
         match matching_bytes(s, predicate) {
             offset if offset == s.len() => Ok(Streaming::Partial(s)),
@@ -630,7 +622,7 @@ pub struct Parser<S> {
 
 impl<S> Parser<S>
 where
-    S: DataSource,
+    S: Read,
 {
     pub fn new(source: S) -> Self {
         Self::with_buffer_capacity(source, StringRing::<S>::DEFAULT_CAPACITY)
@@ -644,89 +636,75 @@ where
         }
     }
 
-    pub async fn next(&mut self) -> Option<Result<TokenS<'_>>> {
+    pub fn next(&mut self) -> Option<Result<TokenS<'_>>> {
         use State::*;
 
         let to_advance = mem::take(&mut self.to_advance);
         self.buffer.advance(to_advance);
 
         match self.state {
-            Initial => self.dispatch_initial().await,
+            Initial => self.dispatch_initial(),
 
-            StreamDeclarationVersion(quote) => {
-                self.dispatch_stream_declaration_version(quote).await
-            }
-            AfterDeclarationVersion => self.dispatch_after_declaration_version().await,
+            StreamDeclarationVersion(quote) => self.dispatch_stream_declaration_version(quote),
+            AfterDeclarationVersion => self.dispatch_after_declaration_version(),
 
             StreamElementOpenName => {
                 self.dispatch_stream_element_open_name(StringRing::name_continuation)
-                    .await
             }
-            AfterElementOpenName => self.dispatch_after_element_open_name().await,
+            AfterElementOpenName => self.dispatch_after_element_open_name(),
 
             StreamAttributeName => {
                 self.dispatch_stream_attribute_name(StringRing::name_continuation)
-                    .await
             }
-            AfterAttributeName => self.dispatch_after_attribute_name().await,
-            StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote).await,
+            AfterAttributeName => self.dispatch_after_attribute_name(),
+            StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote),
 
             StreamElementCloseName => {
                 self.dispatch_stream_element_close_name(StringRing::name_continuation)
-                    .await
             }
-            AfterElementCloseName => self.dispatch_after_element_close_name().await,
+            AfterElementCloseName => self.dispatch_after_element_close_name(),
 
-            StreamCData => self.dispatch_stream_cdata().await,
-            State::AfterCData => self.dispatch_after_cdata().await,
+            StreamCData => self.dispatch_stream_cdata(),
+            State::AfterCData => self.dispatch_after_cdata(),
 
             StreamReferenceNamed => {
                 self.dispatch_stream_reference_named(StringRing::name_continuation)
-                    .await
             }
-            StreamReferenceDecimal => self.dispatch_stream_reference_decimal().await,
-            StreamReferenceHex => self.dispatch_stream_reference_hex().await,
-            AfterReference => self.dispatch_after_reference().await,
+            StreamReferenceDecimal => self.dispatch_stream_reference_decimal(),
+            StreamReferenceHex => self.dispatch_stream_reference_hex(),
+            AfterReference => self.dispatch_after_reference(),
 
             StreamProcessingInstructionName => {
                 self.dispatch_stream_processing_instruction_name(StringRing::name_continuation)
-                    .await
             }
-            AfterProcessingInstructionName => {
-                self.dispatch_after_processing_instruction_name().await
-            }
-            StreamProcessingInstructionValue => {
-                self.dispatch_stream_processing_instruction_value().await
-            }
-            AfterProcessingInstructionValue => {
-                self.dispatch_after_processing_instruction_value().await
-            }
+            AfterProcessingInstructionName => self.dispatch_after_processing_instruction_name(),
+            StreamProcessingInstructionValue => self.dispatch_stream_processing_instruction_value(),
+            AfterProcessingInstructionValue => self.dispatch_after_processing_instruction_value(),
 
-            StreamComment => self.dispatch_stream_comment().await,
-            AfterComment => self.dispatch_after_comment().await,
+            StreamComment => self.dispatch_stream_comment(),
+            AfterComment => self.dispatch_after_comment(),
         }
         .transpose()
     }
 
-    async fn dispatch_initial(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_initial(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        if self.buffer.complete().await? {
+        if self.buffer.complete()? {
             Ok(None)
-        } else if *self.buffer.consume("<").await? {
-            if *self.buffer.consume("/").await? {
+        } else if *self.buffer.consume("<")? {
+            if *self.buffer.consume("/")? {
                 self.state = StreamElementCloseName;
                 self.dispatch_stream_element_close_name(StringRing::name)
-                    .await
-            } else if *self.buffer.consume("![CDATA[").await? {
+            } else if *self.buffer.consume("![CDATA[")? {
                 self.state = StreamCData;
-                self.dispatch_stream_cdata().await
-            } else if *self.buffer.consume("!--").await? {
+                self.dispatch_stream_cdata()
+            } else if *self.buffer.consume("!--")? {
                 self.state = StreamComment;
-                self.dispatch_stream_comment().await
-            } else if *self.buffer.consume("?").await? {
-                if *self.buffer.consume("xml").await? {
-                    let n_space = self.buffer.consume_space().await?;
+                self.dispatch_stream_comment()
+            } else if *self.buffer.consume("?")? {
+                if *self.buffer.consume("xml")? {
+                    let n_space = self.buffer.consume_space()?;
 
                     if n_space == 0 {
                         // This is actually a processing instruction that starts with `xml`
@@ -735,37 +713,35 @@ where
                             "xml",
                         ))))
                     } else {
-                        self.buffer.require("version").await?;
-                        self.buffer.require("=").await?;
-                        let quote = self.buffer.require_quote().await?;
+                        self.buffer.require("version")?;
+                        self.buffer.require("=")?;
+                        let quote = self.buffer.require_quote()?;
 
                         self.state = StreamDeclarationVersion(quote);
-                        self.dispatch_stream_declaration_version(quote).await
+                        self.dispatch_stream_declaration_version(quote)
                     }
                 } else {
                     self.state = StreamProcessingInstructionName;
                     self.dispatch_stream_processing_instruction_name(StringRing::name)
-                        .await
                 }
             } else {
                 self.state = StreamElementOpenName;
                 self.dispatch_stream_element_open_name(StringRing::name)
-                    .await
             }
-        } else if *self.buffer.consume("&#x").await? {
+        } else if *self.buffer.consume("&#x")? {
             self.state = StreamReferenceHex;
-            self.dispatch_stream_reference_hex().await
-        } else if *self.buffer.consume("&#").await? {
+            self.dispatch_stream_reference_hex()
+        } else if *self.buffer.consume("&#")? {
             self.state = StreamReferenceDecimal;
-            self.dispatch_stream_reference_decimal().await
-        } else if *self.buffer.consume("&").await? {
+            self.dispatch_stream_reference_decimal()
+        } else if *self.buffer.consume("&")? {
             self.state = StreamReferenceNamed;
-            self.dispatch_stream_reference_named(StringRing::name).await
-        } else if let Some(l) = self.buffer.space().await? {
+            self.dispatch_stream_reference_named(StringRing::name)
+        } else if let Some(l) = self.buffer.space()? {
             self.to_advance = l;
             let s = &self.buffer.as_str()[..l];
             Ok(Some(Space(Streaming::Complete(s))))
-        } else if let Some(l) = self.buffer.char_data().await? {
+        } else if let Some(l) = self.buffer.char_data()? {
             self.to_advance = l;
             let s = &self.buffer.as_str()[..l];
             Ok(Some(CharData(Streaming::Complete(s))))
@@ -775,24 +751,21 @@ where
         }
     }
 
-    async fn dispatch_after_declaration_version(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_declaration_version(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space().await?;
+        self.buffer.consume_space()?;
 
-        self.buffer.require("?>").await?;
+        self.buffer.require("?>")?;
 
         self.state = Initial;
         Ok(Some(DeclarationClose))
     }
 
-    async fn dispatch_stream_declaration_version(
-        &mut self,
-        quote: Quote,
-    ) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until(quote).await?;
+        let value = self.buffer.consume_until(quote)?;
 
         self.to_advance = value.unify().len();
 
@@ -804,75 +777,60 @@ where
         Ok(Some(DeclarationStart(value)))
     }
 
-    async fn dispatch_stream_element_open_name<'a, Fut>(
+    fn dispatch_stream_element_open_name<'a>(
         &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<TokenS<'a>>>
-    where
-        Fut: Future<Output = Result<Streaming<&'a str>>>,
-    {
+        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
+    ) -> Result<Option<TokenS<'a>>> {
         self.stream_from_buffer(f, State::AfterElementOpenName, Token::ElementOpenStart)
-            .await
     }
 
-    async fn dispatch_stream_element_close_name<'a, Fut>(
+    fn dispatch_stream_element_close_name<'a>(
         &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<TokenS<'a>>>
-    where
-        Fut: Future<Output = Result<Streaming<&'a str>>>,
-    {
+        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
+    ) -> Result<Option<TokenS<'a>>> {
         self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
-            .await
     }
 
-    async fn dispatch_after_element_open_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_element_open_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space().await?;
+        self.buffer.consume_space()?;
 
-        if *self.buffer.consume("/>").await? {
+        if *self.buffer.consume("/>")? {
             self.state = Initial;
             Ok(Some(ElementSelfClose))
-        } else if *self.buffer.consume(">").await? {
+        } else if *self.buffer.consume(">")? {
             self.state = Initial;
             Ok(Some(ElementOpenEnd))
         } else {
             self.state = StreamAttributeName;
-            self.dispatch_stream_attribute_name(StringRing::name).await
+            self.dispatch_stream_attribute_name(StringRing::name)
         }
     }
 
-    async fn dispatch_stream_attribute_name<'a, Fut>(
+    fn dispatch_stream_attribute_name<'a>(
         &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<TokenS<'a>>>
-    where
-        Fut: Future<Output = Result<Streaming<&'a str>>>,
-    {
+        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
+    ) -> Result<Option<TokenS<'a>>> {
         self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeName)
-            .await
     }
 
-    async fn dispatch_after_attribute_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_attribute_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
-        self.buffer.consume_space().await?;
-        self.buffer.require("=").await?;
-        self.buffer.consume_space().await?;
-        let quote = self.buffer.require_quote().await?;
+        self.buffer.consume_space()?;
+        self.buffer.require("=")?;
+        self.buffer.consume_space()?;
+        let quote = self.buffer.require_quote()?;
 
         self.state = StreamAttributeValue(quote);
-        self.dispatch_stream_attribute_value(quote).await
+        self.dispatch_stream_attribute_value(quote)
     }
 
-    async fn dispatch_stream_attribute_value(
-        &mut self,
-        quote: Quote,
-    ) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until(&quote).await?;
+        let value = self.buffer.consume_until(&quote)?;
 
         self.to_advance = value.unify().len();
 
@@ -884,143 +842,126 @@ where
         Ok(Some(AttributeValue(value)))
     }
 
-    async fn dispatch_after_element_close_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_element_close_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
-        self.buffer.consume_space().await?;
-        self.buffer.require(">").await?;
+        self.buffer.consume_space()?;
+        self.buffer.require(">")?;
 
         self.state = Initial;
-        self.dispatch_initial().await
+        self.dispatch_initial()
     }
 
-    async fn dispatch_stream_reference_named<'a, Fut>(
+    fn dispatch_stream_reference_named<'a>(
         &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<TokenS<'a>>>
-    where
-        Fut: Future<Output = Result<Streaming<&'a str>>>,
-    {
+        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
+    ) -> Result<Option<TokenS<'a>>> {
         self.stream_from_buffer(f, State::AfterReference, Token::ReferenceNamed)
-            .await
     }
 
-    async fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(
             StringRing::reference_decimal,
             State::AfterReference,
             Token::ReferenceDecimal,
         )
-        .await
     }
 
-    async fn dispatch_stream_reference_hex(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_reference_hex(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(
             StringRing::reference_hex,
             State::AfterReference,
             Token::ReferenceHex,
         )
-        .await
     }
 
-    async fn dispatch_after_reference(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_reference(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
-        self.buffer.require(";").await?;
+        self.buffer.require(";")?;
         self.state = Initial;
-        self.dispatch_initial().await
+        self.dispatch_initial()
     }
 
-    async fn dispatch_stream_processing_instruction_name<'a, Fut>(
+    fn dispatch_stream_processing_instruction_name<'a>(
         &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
-    ) -> Result<Option<TokenS<'a>>>
-    where
-        Fut: Future<Output = Result<Streaming<&'a str>>>,
-    {
+        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
+    ) -> Result<Option<TokenS<'a>>> {
         self.stream_from_buffer(
             f,
             State::AfterProcessingInstructionName,
             Token::ProcessingInstructionStart,
         )
-        .await
     }
 
-    async fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space().await?;
+        self.buffer.consume_space()?;
 
-        if *self.buffer.consume("?>").await? {
+        if *self.buffer.consume("?>")? {
             self.state = Initial;
             Ok(Some(ProcessingInstructionEnd))
         } else {
             self.state = State::StreamProcessingInstructionValue;
-            self.dispatch_stream_processing_instruction_value().await
+            self.dispatch_stream_processing_instruction_value()
         }
     }
 
-    async fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(
             StringRing::processing_instruction_value,
             State::AfterProcessingInstructionValue,
             Token::ProcessingInstructionValue,
         )
-        .await
     }
 
-    async fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
         use {State::*, Token::*};
 
-        self.buffer.require("?>").await?;
+        self.buffer.require("?>")?;
 
         self.state = Initial;
         Ok(Some(ProcessingInstructionEnd))
     }
 
-    async fn dispatch_stream_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(StringRing::cdata, State::AfterCData, Token::CData)
-            .await
     }
 
-    async fn dispatch_after_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
-        self.buffer.require("]]>").await?;
+        self.buffer.require("]]>")?;
 
         self.state = Initial;
-        self.dispatch_initial().await
+        self.dispatch_initial()
     }
 
-    async fn dispatch_stream_comment(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_comment(&mut self) -> Result<Option<TokenS<'_>>> {
         self.stream_from_buffer(StringRing::comment, State::AfterComment, Token::Comment)
-            .await
     }
 
-    async fn dispatch_after_comment(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_comment(&mut self) -> Result<Option<TokenS<'_>>> {
         use State::*;
 
         self.buffer
-            .require_or_else("-->", |location| DoubleHyphenInComment { location }.build())
-            .await?;
+            .require_or_else("-->", |location| DoubleHyphenInComment { location }.build())?;
 
         self.state = Initial;
-        self.dispatch_initial().await
+        self.dispatch_initial()
     }
 
     // ----------
 
     #[inline]
-    async fn stream_from_buffer<'a, Fut>(
+    fn stream_from_buffer<'a>(
         &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Fut,
+        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
         next_state: State,
         create: impl FnOnce(Streaming<&'a str>) -> TokenS<'a>,
-    ) -> Result<Option<TokenS<'a>>>
-    where
-        Fut: Future<Output = Result<Streaming<&'a str>>>,
-    {
-        let value = f(&mut self.buffer).await?;
+    ) -> Result<Option<TokenS<'a>>> {
+        let value = f(&mut self.buffer)?;
         self.to_advance = value.unify().len();
 
         if value.is_complete() {
@@ -1094,3 +1035,753 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+
+    #[test]
+    fn xml_declaration() -> Result {
+        let tokens = Parser::new_from_str(r#"<?xml version="1.0"?>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [DeclarationStart(Complete("1.0")), DeclarationClose],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn xml_declaration_small_capacity() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity(r#"<?xml version="1.123456789"?>"#)
+            .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                DeclarationStart(Partial("1")),
+                DeclarationStart(Complete(".123456789")),
+                DeclarationClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn xml_declaration_single_quoted() -> Result {
+        let tokens = Parser::new_from_str(r#"<?xml version='1.0'?>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [DeclarationStart(Complete("1.0")), DeclarationClose],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn self_closed_element() -> Result {
+        let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [ElementOpenStart(Complete("alpha")), ElementSelfClose]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn self_closed_element_small_capacity() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity(r#"<a01234567890123456789 />"#)
+            .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Partial("a01234567890123")),
+                ElementOpenStart(Complete("456789")),
+                ElementSelfClose,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn self_closed_element_with_one_attribute() -> Result {
+        let tokens = Parser::new_from_str(r#"<alpha a="b"/>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("alpha")),
+                AttributeName(Complete("a")),
+                AttributeValue(Complete("b")),
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn self_closed_element_with_one_attribute_small_capacity() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity(
+            r#"<a01234567890123456789 b01234567890123456789="c01234567890123456789"/>"#,
+        )
+        .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Partial("a01234567890123")),
+                ElementOpenStart(Complete("456789")),
+                AttributeName(Partial("b01234567")),
+                AttributeName(Complete("890123456789")),
+                AttributeValue(Partial("c0")),
+                AttributeValue(Partial("1234567890123456")),
+                AttributeValue(Complete("789")),
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn attributes_with_both_quote_styles() -> Result {
+        let tokens = Parser::new_from_str(r#"<alpha a="b" c='d'/>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("alpha")),
+                AttributeName(Complete("a")),
+                AttributeValue(Complete("b")),
+                AttributeName(Complete("c")),
+                AttributeValue(Complete("d")),
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn element_with_no_children() -> Result {
+        let tokens = Parser::new_from_str(r#"<alpha></alpha>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("alpha")),
+                ElementOpenEnd,
+                ElementClose(Complete("alpha")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn element_with_no_children_small_capacity() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity(
+            r#"<a01234567890123456789></a01234567890123456789>"#,
+        )
+        .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Partial("a01234567890123")),
+                ElementOpenStart(Complete("456789")),
+                ElementOpenEnd,
+                ElementClose(Partial("a012345")),
+                ElementClose(Complete("67890123456789")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn element_with_one_child() -> Result {
+        let tokens = Parser::new_from_str(r#"<alpha><beta /></alpha>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("alpha")),
+                ElementOpenEnd,
+                ElementOpenStart(Complete("beta")),
+                ElementSelfClose,
+                ElementClose(Complete("alpha")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn char_data() -> Result {
+        let tokens = Parser::new_from_str("<a>b</a>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("a")),
+                ElementOpenEnd,
+                CharData(Complete("b")),
+                ElementClose(Complete("a")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn cdata() -> Result {
+        let tokens = Parser::new_from_str("<![CDATA[ hello ]]>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [CData(Complete(" hello "))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cdata_small_buffer() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity("<![CDATA[aaaaaaaaaaaaaaaaaaaa]]>")
+            .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [CData(Partial("aaaaaaa")), CData(Complete("aaaaaaaaaaaaa"))]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn only_space() -> Result {
+        let tokens = Parser::new_from_str(" \t\r\n").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [Space(Complete(" \t\r\n"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn leading_and_trailing_whitespace_self_closed() -> Result {
+        let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                Space(Complete("\t ")),
+                ElementOpenStart(Complete("a")),
+                ElementSelfClose,
+                Space(Complete("\r\n")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn leading_and_trailing_whitespace() -> Result {
+        let tokens = Parser::new_from_str("\t <a></a>\r\n").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                Space(Complete("\t ")),
+                ElementOpenStart(Complete("a")),
+                ElementOpenEnd,
+                ElementClose(Complete("a")),
+                Space(Complete("\r\n")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn processing_instruction() -> Result {
+        let tokens = Parser::new_from_str("<?a?>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Complete("a")),
+                ProcessingInstructionEnd,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn processing_instruction_small_capacity() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa?>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
+                ProcessingInstructionStart(Complete("aaaaaa")),
+                ProcessingInstructionEnd,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn processing_instruction_starts_with_xml() -> Result {
+        let tokens = Parser::new_from_str("<?xml-but-not-that?>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Partial("xml")),
+                ProcessingInstructionStart(Complete("-but-not-that")),
+                ProcessingInstructionEnd,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn processing_instruction_with_value() -> Result {
+        let tokens = Parser::new_from_str("<?a b?>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Complete("a")),
+                ProcessingInstructionValue(Complete("b")),
+                ProcessingInstructionEnd,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn processing_instruction_with_value_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb?>")
+                .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
+                ProcessingInstructionStart(Complete("aaaaaa")),
+                ProcessingInstructionValue(Partial("bbbbbbbbb")),
+                ProcessingInstructionValue(Complete("bbbbbbbbbbb")),
+                ProcessingInstructionEnd
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn comment() -> Result {
+        let tokens = Parser::new_from_str("<!-- hello -->").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [Comment(Complete(" hello "))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn comment_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("<!--aaaaaaaaaaaaaaaaaaaa-->").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                Comment(Partial("aaaaaaaaaaaa")),
+                Comment(Complete("aaaaaaaa")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_named() -> Result {
+        let tokens = Parser::new_from_str("&lt;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ReferenceNamed(Complete("lt"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_named_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("&aaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ReferenceNamed(Partial("aaaaaaaaaaaaaaa")),
+                ReferenceNamed(Complete("aaaaa")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_decimal() -> Result {
+        let tokens = Parser::new_from_str("&#42;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ReferenceDecimal(Complete("42"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_decimal_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("&#11111111111111111111;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ReferenceDecimal(Partial("11111111111111")),
+                ReferenceDecimal(Complete("111111")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_hex() -> Result {
+        let tokens = Parser::new_from_str("&#xBEEF;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ReferenceHex(Complete("BEEF"))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reference_hex_small_buffer() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity("&#xaaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ReferenceHex(Partial("aaaaaaaaaaaaa")),
+                ReferenceHex(Complete("aaaaaaa")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    // After parsing a name to the end of the buffer, when we start
+    // parsing again, we need to allow the first character to be a
+    // non-start-char.
+    #[test]
+    fn names_that_span_blocks_can_continue_with_non_start_chars() -> Result {
+        let tokens =
+            Parser::new_from_str_and_min_capacity(r#"<a----------------/>"#).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Partial("a--------------")),
+                ElementOpenStart(Complete("--")),
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_lookahead_at_end_of_input() -> Result {
+        // Parser looked for `<?`, which didn't fit and since
+        // we ran out of input, we got an error.
+        let input = " ";
+
+        let tokens = Parser::new_from_str_and_min_capacity(input).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [Space(Complete(" "))]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_processing_instruction_lookahead_that_spans_blocks() -> Result {
+        // Parser looked for `?>`, which was split across the current
+        // buffer and the next.
+        let input = "<?a aaaaaaaaaaaaaaaaaaaaaaaaaaa?>";
+
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ProcessingInstructionStart(Complete("a")),
+                ProcessingInstructionValue(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                ProcessingInstructionValue(Complete("")),
+                ProcessingInstructionEnd,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_comment_lookahead_that_spans_blocks_1() -> Result {
+        let input = "<!--aaaaaaaaaaaaaaaaaaaaaaaaaaa-->";
+        //                         The last byte is ^
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                Comment(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                Comment(Complete("")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_cdata_lookahead_that_spans_blocks_1() -> Result {
+        let input = "<![CDATA[aaaaaaaaaaaaaaaaaaaaaa]]>";
+        //      this is the last byte in the buffer ^
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                CData(Partial("aaaaaaaaaaaaaaaaaaaaaa")),
+                CData(Complete("")),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_byte_cdata_lookahead_that_spans_blocks_2() -> Result {
+        let input = "<![CDATA[aaaaaaaaaaaaaaaaaaaaa]]>";
+        //      this is the last byte in the buffer ^
+        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [CData(Partial("aaaaaaaaaaaaaaaaaaaaa")), CData(Complete(""))],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_comments_disallow_double_hyphens() -> Result {
+        let error = Parser::new_from_str("<!------>").collect_owned();
+
+        assert_error!(error, Error::DoubleHyphenInComment { location: 4 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_non_utf_8() -> Result {
+        let error = Parser::new_from_bytes(&[b'a', b'b', b'c', 0xFF]).collect_owned();
+
+        assert_error!(
+            error,
+            Error::InputNotUtf8 {
+                location: 3,
+                length: 1,
+            }
+        );
+
+        Ok(())
+    }
+
+    impl<'a> Parser<&'a [u8]> {
+        fn new_from_str(s: &'a str) -> Self {
+            Self::new_from_str_and_capacity(s, StringRing::<&[u8]>::DEFAULT_CAPACITY)
+        }
+
+        fn new_from_str_and_min_capacity(s: &'a str) -> Self {
+            Self::new_from_str_and_capacity(s, StringRing::<&[u8]>::MINIMUM_CAPACITY)
+        }
+
+        fn new_from_str_and_capacity(s: &'a str, capacity: usize) -> Self {
+            Parser::with_buffer_capacity(s.as_bytes(), capacity)
+        }
+
+        fn new_from_bytes(s: &'a [u8]) -> Self {
+            Self::new_from_bytes_and_capacity(s, StringRing::<&[u8]>::DEFAULT_CAPACITY)
+        }
+
+        fn new_from_bytes_and_capacity(s: &'a [u8], capacity: usize) -> Self {
+            Parser::with_buffer_capacity(s, capacity)
+        }
+    }
+
+    impl<R> Parser<R>
+    where
+        R: std::io::Read,
+    {
+        fn collect_owned(&mut self) -> super::Result<Vec<Token<Streaming<String>>>> {
+            let mut v = vec![];
+            while let Some(t) = self.next() {
+                v.push(t?.map(|s| s.map(str::to_owned)));
+            }
+            Ok(v)
+        }
+
+        fn collect_fused(&mut self) -> super::Result<Vec<Token<String>>> {
+            use {Streaming::*, Token::*};
+
+            let mut vv = vec![];
+            let mut current: Option<Token<String>> = None;
+
+            while let Some(t) = self.next() {
+                let t = t?;
+
+                macro_rules! fuse_tokens {
+                    ($($vname:ident $(($field:ident))?,)*) => {
+                        match t {
+                            $(
+                                fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?)
+                            ,)*
+                        }
+                    };
+
+                    (@pat $vname:ident $field:ident) => { $vname($field) };
+                    (@arm $vname:ident $field:ident) => {
+                        match $field {
+                            Partial(x) => {
+                                match &mut current {
+                                    Some($vname(s)) => s.push_str(x),
+                                    Some(other) => {
+                                        let other = mem::replace(other, $vname(x.to_string()));
+                                        vv.push(other);
+                                    }
+                                    None => current = Some($vname(x.to_string())),
+                                }
+                            },
+                            Complete(x) => {
+                                match current.take() {
+                                    Some($vname(mut s)) => {
+                                        s.push_str(x);
+                                        vv.push($vname(s));
+                                    }
+                                    Some(other) => {
+                                        vv.push(other);
+                                        vv.push($vname(x.to_string()));
+                                    }
+                                    None => {
+                                        vv.push($vname(x.to_string()));
+                                    }
+                                }
+                            },
+                        }
+                    };
+
+                    (@pat $vname:ident) => { $vname };
+                    (@arm $vname:ident) => {
+                        match current.take() {
+                            Some(other) => {
+                                vv.push(other);
+                                vv.push($vname);
+                            }
+                            None => {
+                                vv.push($vname);
+                            }
+                        }
+                    };
+                }
+
+                fuse_tokens! {
+                    DeclarationStart(val),
+                    DeclarationClose,
+
+                    ElementOpenStart(val),
+                    ElementOpenEnd,
+                    ElementSelfClose,
+                    ElementClose(val),
+
+                    AttributeName(val),
+                    AttributeValue(val),
+
+                    CharData(val),
+                    CData(val),
+                    Space(val),
+
+                    ReferenceNamed(val),
+                    ReferenceDecimal(val),
+                    ReferenceHex(val),
+
+                    ProcessingInstructionStart(val),
+                    ProcessingInstructionValue(val),
+                    ProcessingInstructionEnd,
+
+                    Comment(val),
+                }
+            }
+
+            Ok(vv)
+        }
+    }
+}
