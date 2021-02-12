@@ -179,11 +179,13 @@ where
         }
     }
 
-    fn require(&mut self, s: impl AsRef<str>) -> Result<()> {
-        let token = s.as_ref();
-
+    fn require(&mut self, token: &'static str) -> Result<()> {
         self.require_or_else(token, |location| {
-            RequiredTokenMissing { token, location }.build()
+            RequiredTokenMissing {
+                token: RequiredToken::from_token(token),
+                location,
+            }
+            .build()
         })
     }
 
@@ -991,6 +993,30 @@ impl<T> std::ops::DerefMut for MustUse<T> {
     }
 }
 
+#[derive(Debug)]
+pub enum RequiredToken {
+    Version,
+    Equals,
+    QuestionMarkClosingAngleBracket,
+    ClosingAngleBracket,
+    Semicolon,
+    CDataEnd,
+}
+
+impl RequiredToken {
+    fn from_token(s: &'static str) -> Self {
+        match s {
+            "version" => Self::Version,
+            "=" => Self::Equals,
+            "?>" => Self::QuestionMarkClosingAngleBracket,
+            ">" => Self::ClosingAngleBracket,
+            ";" => Self::Semicolon,
+            "]]>" => Self::CDataEnd,
+            _ => panic!("unknown token"),
+        }
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum Error {
     NoMoreInputAvailable,
@@ -1011,7 +1037,7 @@ pub enum Error {
         location
     ))]
     RequiredTokenMissing {
-        token: String,
+        token: RequiredToken,
         location: usize,
     },
 
