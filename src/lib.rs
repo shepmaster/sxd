@@ -713,43 +713,45 @@ where
 
         if self.buffer.complete().await? {
             Ok(None)
-        } else if *self.buffer.consume("<![CDATA[").await? {
-            self.state = StreamCData;
-            self.dispatch_stream_cdata().await
-        } else if *self.buffer.consume("<!--").await? {
-            self.state = StreamComment;
-            self.dispatch_stream_comment().await
-        } else if *self.buffer.consume("<?").await? {
-            if *self.buffer.consume("xml").await? {
-                let n_space = self.buffer.consume_space().await?;
+        } else if *self.buffer.consume("<").await? {
+            if *self.buffer.consume("/").await? {
+                self.state = StreamElementCloseName;
+                self.dispatch_stream_element_close_name(StringRing::name)
+                    .await
+            } else if *self.buffer.consume("![CDATA[").await? {
+                self.state = StreamCData;
+                self.dispatch_stream_cdata().await
+            } else if *self.buffer.consume("!--").await? {
+                self.state = StreamComment;
+                self.dispatch_stream_comment().await
+            } else if *self.buffer.consume("?").await? {
+                if *self.buffer.consume("xml").await? {
+                    let n_space = self.buffer.consume_space().await?;
 
-                if n_space == 0 {
-                    // This is actually a processing instruction that starts with `xml`
-                    self.state = StreamProcessingInstructionName;
-                    Ok(Some(Token::ProcessingInstructionStart(Streaming::Partial(
-                        "xml",
-                    ))))
+                    if n_space == 0 {
+                        // This is actually a processing instruction that starts with `xml`
+                        self.state = StreamProcessingInstructionName;
+                        Ok(Some(Token::ProcessingInstructionStart(Streaming::Partial(
+                            "xml",
+                        ))))
+                    } else {
+                        self.buffer.require("version").await?;
+                        self.buffer.require("=").await?;
+                        let quote = self.buffer.require_quote().await?;
+
+                        self.state = StreamDeclarationVersion(quote);
+                        self.dispatch_stream_declaration_version(quote).await
+                    }
                 } else {
-                    self.buffer.require("version").await?;
-                    self.buffer.require("=").await?;
-                    let quote = self.buffer.require_quote().await?;
-
-                    self.state = StreamDeclarationVersion(quote);
-                    self.dispatch_stream_declaration_version(quote).await
+                    self.state = StreamProcessingInstructionName;
+                    self.dispatch_stream_processing_instruction_name(StringRing::name)
+                        .await
                 }
             } else {
-                self.state = StreamProcessingInstructionName;
-                self.dispatch_stream_processing_instruction_name(StringRing::name)
+                self.state = StreamElementOpenName;
+                self.dispatch_stream_element_open_name(StringRing::name)
                     .await
             }
-        } else if *self.buffer.consume("</").await? {
-            self.state = StreamElementCloseName;
-            self.dispatch_stream_element_close_name(StringRing::name)
-                .await
-        } else if *self.buffer.consume("<").await? {
-            self.state = StreamElementOpenName;
-            self.dispatch_stream_element_open_name(StringRing::name)
-                .await
         } else if *self.buffer.consume("&#x").await? {
             self.state = StreamReferenceHex;
             self.dispatch_stream_reference_hex().await
