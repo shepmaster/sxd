@@ -3,14 +3,13 @@
 
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
-use std::io::Read;
-use std::{mem, str};
+use std::{io::Read, mem, str};
 
 #[macro_use]
 mod macros;
 
 #[derive(Debug)]
-struct StringRing<S> {
+struct StringRing {
     buffer: Vec<u8>,
 
     n_offset_bytes: usize,
@@ -19,23 +18,16 @@ struct StringRing<S> {
 
     n_retired_bytes: usize,
 
-    source: S,
+    source_exhausted: bool,
 }
 
-impl<S> StringRing<S>
-where
-    S: Read,
-{
+impl StringRing {
     // The longest single token should be `standalone`, then round up
     // a bit.
     const MINIMUM_CAPACITY: usize = 16;
     const DEFAULT_CAPACITY: usize = 1024;
 
-    fn new(source: S) -> Self {
-        Self::with_buffer_capacity(source, Self::DEFAULT_CAPACITY)
-    }
-
-    fn with_buffer_capacity(source: S, capacity: usize) -> Self {
+    fn with_capacity(capacity: usize) -> Self {
         assert!(
             capacity >= Self::MINIMUM_CAPACITY,
             "The capacity must be large enough to match minimum token lengths",
@@ -50,7 +42,7 @@ where
 
             n_retired_bytes: 0,
 
-            source,
+            source_exhausted: false,
         }
     }
 
@@ -63,10 +55,13 @@ where
         unsafe { str::from_utf8_unchecked(bytes) }
     }
 
+    /// Tries to return a string with the given byte length, but if
+    /// the input is exhausted, the returned string may be shorter.
     fn min_str(&mut self, len: usize) -> Result<&str> {
-        if self.n_utf8_bytes < len {
-            abandon!(self.extend());
-        }
+        ensure!(
+            self.n_utf8_bytes >= len || self.source_exhausted,
+            NeedsMoreInput
+        );
         Ok(self.as_str())
     }
 
@@ -78,7 +73,10 @@ where
         self.n_retired_bytes + self.n_offset_bytes
     }
 
-    fn extend(&mut self) -> Result<()> {
+    fn refill_using<E>(
+        &mut self,
+        f: impl FnOnce(&mut [u8]) -> Result<usize, E>,
+    ) -> Result<Result<usize, E>> {
         let mut buffer =
             &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][self.n_dangling_bytes..];
 
@@ -97,8 +95,14 @@ where
             "No room left to store data in buffer; buffer too small",
         );
 
-        let n_new_bytes = self.source.read(buffer).expect("todo");
-        ensure!(n_new_bytes > 0, NoMoreInputAvailable);
+        let n_new_bytes = match f(buffer) {
+            Ok(n) => n,
+            Err(e) => return Ok(Err(e)),
+        };
+
+        if n_new_bytes == 0 {
+            self.source_exhausted = true;
+        }
 
         self.n_dangling_bytes += n_new_bytes;
 
@@ -123,32 +127,16 @@ where
         self.n_dangling_bytes -= n_new_utf8_bytes;
         self.n_utf8_bytes += n_new_utf8_bytes;
 
-        Ok(())
+        Ok(Ok(n_new_bytes))
     }
 
-    fn complete(&mut self) -> Result<bool> {
-        if !self.as_str().is_empty() {
-            return Ok(false);
-        }
-
-        match self.extend() {
-            Ok(()) => Ok(self.as_str().is_empty()),
-            Err(Error::NoMoreInputAvailable) => Ok(true),
-            Err(e) => Err(e),
-        }
+    fn complete(&mut self) -> bool {
+        self.n_utf8_bytes == 0 && self.n_dangling_bytes == 0 && self.source_exhausted
     }
 
     fn starts_with(&mut self, needle: &str) -> Result<bool> {
-        while self.n_utf8_bytes < needle.len() {
-            // TODO: Avoid infinite loop
-            match self.extend() {
-                Ok(_) => {}
-                Err(Error::NoMoreInputAvailable) => return Ok(false),
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(self.as_str().starts_with(needle))
+        let s = abandon!(self.min_str(needle.len()));
+        Ok(s.starts_with(needle))
     }
 
     fn advance(&mut self, n_bytes: usize) {
@@ -166,6 +154,21 @@ where
         if abandon!(self.starts_with(s)) {
             self.advance(s.len());
             Ok(MustUse(true))
+        } else {
+            Ok(MustUse(false))
+        }
+    }
+
+    fn consume_xml(&mut self) -> Result<MustUse<bool>> {
+        let s = abandon!(self.min_str(4));
+
+        if let Some(x) = s.strip_prefix("xml") {
+            if x.starts_with(|c: char| c.is_space()) {
+                self.advance(4);
+                Ok(MustUse(true))
+            } else {
+                Ok(MustUse(false))
+            }
         } else {
             Ok(MustUse(false))
         }
@@ -218,16 +221,12 @@ where
     }
 
     /// Warning: This only works for single bytes!
-    fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<&str>> {
-        let mut s = self.as_str();
-        if s.is_empty() {
-            abandon!(self.extend());
-            s = self.as_str();
-        }
+    fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<usize>> {
+        let s = abandon!(self.some_str());
 
         match s.find(needle.as_ref()) {
-            Some(x) => Ok(Streaming::Complete(&self.as_str()[..x])),
-            None => Ok(Streaming::Partial(self.as_str())),
+            Some(x) => Ok(Streaming::Complete(x)),
+            None => Ok(Streaming::Partial(s.len())),
         }
     }
 
@@ -247,40 +246,40 @@ where
     }
 
     /// Anything that's not `]]>`
-    fn cdata(&mut self) -> Result<Streaming<&str>> {
+    fn cdata(&mut self) -> Result<Streaming<usize>> {
         let s = abandon!(self.min_str(3));
 
         match s.find("]]>") {
-            Some(offset) => return Ok(Streaming::Complete(&s[..offset])),
+            Some(offset) => return Ok(Streaming::Complete(offset)),
             None => {
                 // Once for each `]`
                 let s = s.strip_suffix(']').unwrap_or(s);
                 let s = s.strip_suffix(']').unwrap_or(s);
-                Ok(Streaming::Partial(s))
+                Ok(Streaming::Partial(s.len()))
             }
         }
     }
 
-    fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
+    fn processing_instruction_value(&mut self) -> Result<Streaming<usize>> {
         let s = abandon!(self.min_str(2));
 
         match s.find("?>") {
-            Some(offset) => Ok(Streaming::Complete(&s[..offset])),
+            Some(offset) => Ok(Streaming::Complete(offset)),
             None => {
                 let s = s.strip_suffix('?').unwrap_or(s);
-                Ok(Streaming::Partial(s))
+                Ok(Streaming::Partial(s.len()))
             }
         }
     }
 
-    fn comment(&mut self) -> Result<Streaming<&str>> {
+    fn comment(&mut self) -> Result<Streaming<usize>> {
         let s = abandon!(self.min_str(2));
 
         match s.find("--") {
-            Some(offset) => Ok(Streaming::Complete(&s[..offset])),
+            Some(offset) => Ok(Streaming::Complete(offset)),
             None => {
                 let s = s.strip_suffix('-').unwrap_or(s);
-                Ok(Streaming::Partial(s))
+                Ok(Streaming::Partial(s.len()))
             }
         }
     }
@@ -304,15 +303,15 @@ where
         Ok(total)
     }
 
-    fn reference_decimal(&mut self) -> Result<Streaming<&str>> {
+    fn reference_decimal(&mut self) -> Result<Streaming<usize>> {
         self.while_char(char::is_ascii_digit)
     }
 
-    fn reference_hex(&mut self) -> Result<Streaming<&str>> {
+    fn reference_hex(&mut self) -> Result<Streaming<usize>> {
         self.while_char(char::is_ascii_hexdigit)
     }
 
-    fn name(&mut self) -> Result<Streaming<&str>> {
+    fn name(&mut self) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
         let mut c = s.char_indices();
@@ -323,7 +322,7 @@ where
             .map(|(i, c)| i + c.len_utf8())
         {
             Some(i) => i,
-            None => return Ok(Streaming::Complete("")),
+            None => return Ok(Streaming::Complete(0)),
         };
 
         let end_idx = c
@@ -333,23 +332,23 @@ where
             .unwrap_or(end_idx);
 
         if end_idx == s.len() {
-            Ok(Streaming::Partial(s))
+            Ok(Streaming::Partial(s.len()))
         } else {
-            Ok(Streaming::Complete(&s[..end_idx]))
+            Ok(Streaming::Complete(end_idx))
         }
     }
 
-    fn name_continuation(&mut self) -> Result<Streaming<&str>> {
+    fn name_continuation(&mut self) -> Result<Streaming<usize>> {
         self.while_char(char::is_name_char)
     }
 
     #[inline]
-    fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<&str>> {
+    fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
         match matching_bytes(s, predicate) {
-            offset if offset == s.len() => Ok(Streaming::Partial(s)),
-            offset => Ok(Streaming::Complete(&s[..offset])),
+            offset if offset == s.len() => Ok(Streaming::Partial(s.len())),
+            offset => Ok(Streaming::Complete(offset)),
         }
     }
 }
@@ -630,38 +629,63 @@ impl_token! {
     }
 }
 
-type TokenS<'a> = Token<Streaming<&'a str>>;
+type Tok = Token<Streaming<usize>>;
+type RollbackState = (usize, usize, State);
 
 #[derive(Debug)]
-pub struct Parser<S> {
-    buffer: StringRing<S>,
+pub struct CoreParser {
+    buffer: StringRing,
     state: State,
     to_advance: usize,
 }
 
-impl<S> Parser<S>
-where
-    S: Read,
-{
-    pub fn new(source: S) -> Self {
-        Self::with_buffer_capacity(source, StringRing::<S>::DEFAULT_CAPACITY)
+impl CoreParser {
+    pub fn new() -> Self {
+        Self::with_capacity(StringRing::DEFAULT_CAPACITY)
     }
 
-    pub fn with_buffer_capacity(source: S, capacity: usize) -> Self {
-        Parser {
-            buffer: StringRing::with_buffer_capacity(source, capacity),
+    pub fn with_capacity(capacity: usize) -> Self {
+        CoreParser {
+            buffer: StringRing::with_capacity(capacity),
             state: State::Initial,
             to_advance: 0,
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<TokenS<'_>>> {
+    pub fn as_str(&self) -> &str {
+        self.buffer.as_str()
+    }
+
+    pub fn refill_using<E>(
+        &mut self,
+        f: impl FnOnce(&mut [u8]) -> Result<usize, E>,
+    ) -> Result<Result<usize, E>> {
+        self.buffer.refill_using(f)
+    }
+
+    fn rollback_state(&self) -> RollbackState {
+        (
+            self.buffer.n_offset_bytes,
+            self.buffer.n_utf8_bytes,
+            self.state,
+        )
+    }
+
+    fn rollback_to(&mut self, state: RollbackState) {
+        self.buffer.n_offset_bytes = state.0;
+        self.buffer.n_utf8_bytes = state.1;
+        self.state = state.2;
+    }
+
+    pub fn next(&mut self) -> Option<Result<Token<Streaming<usize>>>> {
         use State::*;
 
         let to_advance = mem::take(&mut self.to_advance);
         self.buffer.advance(to_advance);
 
-        match self.state {
+        let rollback_state = self.rollback_state();
+
+        let token = match self.state {
             Initial => self.dispatch_initial(),
 
             StreamDeclarationVersion(quote) => self.dispatch_stream_declaration_version(quote),
@@ -702,14 +726,19 @@ where
 
             StreamComment => self.dispatch_stream_comment(),
             AfterComment => self.dispatch_after_comment(),
+        };
+
+        if matches!(token, Err(Error::NeedsMoreInput)) {
+            self.rollback_to(rollback_state);
         }
-        .transpose()
+
+        token.transpose()
     }
 
-    fn dispatch_initial(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_initial(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        if self.buffer.complete()? {
+        if self.buffer.complete() {
             return Ok(None);
         }
 
@@ -729,23 +758,14 @@ where
                     return self.dispatch_stream_comment();
                 }
                 if *self.buffer.consume("?")? {
-                    if *self.buffer.consume("xml")? {
-                        let n_space = self.buffer.consume_space()?;
+                    if *self.buffer.consume_xml()? {
+                        self.buffer.consume_space()?;
+                        self.buffer.require("version")?;
+                        self.buffer.require("=")?;
+                        let quote = self.buffer.require_quote()?;
 
-                        if n_space == 0 {
-                            // This is actually a processing instruction that starts with `xml`
-                            self.state = StreamProcessingInstructionName;
-                            return Ok(Some(Token::ProcessingInstructionStart(
-                                Streaming::Partial("xml"),
-                            )));
-                        } else {
-                            self.buffer.require("version")?;
-                            self.buffer.require("=")?;
-                            let quote = self.buffer.require_quote()?;
-
-                            self.state = StreamDeclarationVersion(quote);
-                            return self.dispatch_stream_declaration_version(quote);
-                        }
+                        self.state = StreamDeclarationVersion(quote);
+                        return self.dispatch_stream_declaration_version(quote);
                     } else {
                         self.state = StreamProcessingInstructionName;
                         return self.dispatch_stream_processing_instruction_name(StringRing::name);
@@ -760,12 +780,10 @@ where
 
         if let Some(l) = self.buffer.space()? {
             self.to_advance = l;
-            let s = &self.buffer.as_str()[..l];
-            Ok(Some(Space(Streaming::Complete(s))))
+            Ok(Some(Space(Streaming::Complete(l))))
         } else if let Some(l) = self.buffer.char_data()? {
             self.to_advance = l;
-            let s = &self.buffer.as_str()[..l];
-            Ok(Some(CharData(Streaming::Complete(s))))
+            Ok(Some(CharData(Streaming::Complete(l))))
         } else if *self.buffer.consume("&#x")? {
             self.state = StreamReferenceHex;
             self.dispatch_stream_reference_hex()
@@ -781,7 +799,7 @@ where
         }
     }
 
-    fn dispatch_after_declaration_version(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_declaration_version(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         self.buffer.consume_space()?;
@@ -792,12 +810,12 @@ where
         Ok(Some(DeclarationClose))
     }
 
-    fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         let value = self.buffer.consume_until(quote)?;
 
-        self.to_advance = value.unify().len();
+        self.to_advance = *value.unify();
 
         if value.is_complete() {
             self.state = AfterDeclarationVersion;
@@ -807,21 +825,21 @@ where
         Ok(Some(DeclarationStart(value)))
     }
 
-    fn dispatch_stream_element_open_name<'a>(
-        &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
-    ) -> Result<Option<TokenS<'a>>> {
+    fn dispatch_stream_element_open_name(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<Tok>> {
         self.stream_from_buffer(f, State::AfterElementOpenName, Token::ElementOpenStart)
     }
 
-    fn dispatch_stream_element_close_name<'a>(
-        &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
-    ) -> Result<Option<TokenS<'a>>> {
+    fn dispatch_stream_element_close_name(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<Tok>> {
         self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
     }
 
-    fn dispatch_after_element_open_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_element_open_name(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         self.buffer.consume_space()?;
@@ -838,14 +856,14 @@ where
         }
     }
 
-    fn dispatch_stream_attribute_name<'a>(
-        &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
-    ) -> Result<Option<TokenS<'a>>> {
+    fn dispatch_stream_attribute_name(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<Tok>> {
         self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeName)
     }
 
-    fn dispatch_after_attribute_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_attribute_name(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
         self.buffer.consume_space()?;
@@ -857,12 +875,12 @@ where
         self.dispatch_stream_attribute_value(quote)
     }
 
-    fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         let value = self.buffer.consume_until(&quote)?;
 
-        self.to_advance = value.unify().len();
+        self.to_advance = *value.unify();
 
         if value.is_complete() {
             self.state = AfterElementOpenName;
@@ -872,7 +890,7 @@ where
         Ok(Some(AttributeValue(value)))
     }
 
-    fn dispatch_after_element_close_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_element_close_name(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
         self.buffer.consume_space()?;
@@ -882,14 +900,14 @@ where
         self.dispatch_initial()
     }
 
-    fn dispatch_stream_reference_named<'a>(
-        &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
-    ) -> Result<Option<TokenS<'a>>> {
+    fn dispatch_stream_reference_named(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<Tok>> {
         self.stream_from_buffer(f, State::AfterReference, Token::ReferenceNamed)
     }
 
-    fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<Tok>> {
         self.stream_from_buffer(
             StringRing::reference_decimal,
             State::AfterReference,
@@ -897,7 +915,7 @@ where
         )
     }
 
-    fn dispatch_stream_reference_hex(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_reference_hex(&mut self) -> Result<Option<Tok>> {
         self.stream_from_buffer(
             StringRing::reference_hex,
             State::AfterReference,
@@ -905,7 +923,7 @@ where
         )
     }
 
-    fn dispatch_after_reference(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_reference(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
         self.buffer.require(";")?;
@@ -913,10 +931,10 @@ where
         self.dispatch_initial()
     }
 
-    fn dispatch_stream_processing_instruction_name<'a>(
-        &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
-    ) -> Result<Option<TokenS<'a>>> {
+    fn dispatch_stream_processing_instruction_name(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<Tok>> {
         self.stream_from_buffer(
             f,
             State::AfterProcessingInstructionName,
@@ -924,7 +942,7 @@ where
         )
     }
 
-    fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         self.buffer.consume_space()?;
@@ -938,7 +956,7 @@ where
         }
     }
 
-    fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<Tok>> {
         self.stream_from_buffer(
             StringRing::processing_instruction_value,
             State::AfterProcessingInstructionValue,
@@ -946,7 +964,7 @@ where
         )
     }
 
-    fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         self.buffer.require("?>")?;
@@ -955,11 +973,11 @@ where
         Ok(Some(ProcessingInstructionEnd))
     }
 
-    fn dispatch_stream_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_cdata(&mut self) -> Result<Option<Tok>> {
         self.stream_from_buffer(StringRing::cdata, State::AfterCData, Token::CData)
     }
 
-    fn dispatch_after_cdata(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_cdata(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
         self.buffer.require("]]>")?;
@@ -968,11 +986,11 @@ where
         self.dispatch_initial()
     }
 
-    fn dispatch_stream_comment(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_stream_comment(&mut self) -> Result<Option<Tok>> {
         self.stream_from_buffer(StringRing::comment, State::AfterComment, Token::Comment)
     }
 
-    fn dispatch_after_comment(&mut self) -> Result<Option<TokenS<'_>>> {
+    fn dispatch_after_comment(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
         self.buffer
@@ -985,14 +1003,14 @@ where
     // ----------
 
     #[inline]
-    fn stream_from_buffer<'a>(
-        &'a mut self,
-        f: impl FnOnce(&'a mut StringRing<S>) -> Result<Streaming<&'a str>>,
+    fn stream_from_buffer(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
         next_state: State,
-        create: impl FnOnce(Streaming<&'a str>) -> TokenS<'a>,
-    ) -> Result<Option<TokenS<'a>>> {
+        create: impl FnOnce(Streaming<usize>) -> Tok,
+    ) -> Result<Option<Tok>> {
         let value = f(&mut self.buffer)?;
-        self.to_advance = value.unify().len();
+        self.to_advance = *value.unify();
 
         if value.is_complete() {
             self.state = next_state;
@@ -1047,7 +1065,7 @@ impl RequiredToken {
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    NoMoreInputAvailable,
+    NeedsMoreInput,
 
     #[snafu(display(
         "The {} bytes of input data, starting at byte {}, was not UTF-8",
@@ -1089,6 +1107,60 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+pub struct Parser<R> {
+    source: R,
+    parser: CoreParser,
+    exhausted: bool,
+}
+
+impl<R> Parser<R>
+where
+    R: Read,
+{
+    pub fn new(source: R) -> Self {
+        Self::with_buffer_capacity(source, StringRing::DEFAULT_CAPACITY)
+    }
+
+    pub fn with_buffer_capacity(source: R, capacity: usize) -> Self {
+        Self {
+            source,
+            parser: CoreParser::with_capacity(capacity),
+            exhausted: false,
+        }
+    }
+
+    pub fn next(&mut self) -> Option<Result<Token<Streaming<&str>>>> {
+        let Self {
+            parser,
+            source,
+            exhausted,
+        } = self;
+
+        let v = loop {
+            match parser.next() {
+                Some(Ok(v)) => break Some(Ok(v)),
+                None | Some(Err(Error::NeedsMoreInput)) => {}
+                Some(Err(e)) => break Some(Err(e)),
+            }
+
+            let n_new_bytes = parser.refill_using(|buf| source.read(buf));
+
+            match n_new_bytes {
+                Ok(Ok(0)) if *exhausted => return None,
+                Ok(Ok(0)) => {
+                    *exhausted = true;
+                    continue;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(e)) => panic!("Report this: {}", e),
+                Err(e) => return Some(Err(e)),
+            }
+        };
+
+        v.map(move |t| t.map(move |t| t.map(move |t| t.map(move |t| &parser.as_str()[..t]))))
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -1423,8 +1495,7 @@ mod test {
         assert_eq!(
             tokens,
             [
-                ProcessingInstructionStart(Partial("xml")),
-                ProcessingInstructionStart(Complete("-but-not-that")),
+                ProcessingInstructionStart(Complete("xml-but-not-that")),
                 ProcessingInstructionEnd,
             ],
         );
@@ -1712,29 +1783,29 @@ mod test {
 
     impl<'a> Parser<&'a [u8]> {
         fn new_from_str(s: &'a str) -> Self {
-            Self::new_from_str_and_capacity(s, StringRing::<&[u8]>::DEFAULT_CAPACITY)
+            Self::new_from_str_and_capacity(s, StringRing::DEFAULT_CAPACITY)
         }
 
         fn new_from_str_and_min_capacity(s: &'a str) -> Self {
-            Self::new_from_str_and_capacity(s, StringRing::<&[u8]>::MINIMUM_CAPACITY)
+            Self::new_from_str_and_capacity(s, StringRing::MINIMUM_CAPACITY)
         }
 
         fn new_from_str_and_capacity(s: &'a str, capacity: usize) -> Self {
-            Parser::with_buffer_capacity(s.as_bytes(), capacity)
+            Self::with_buffer_capacity(s.as_bytes(), capacity)
         }
 
         fn new_from_bytes(s: &'a [u8]) -> Self {
-            Self::new_from_bytes_and_capacity(s, StringRing::<&[u8]>::DEFAULT_CAPACITY)
+            Self::new_from_bytes_and_capacity(s, StringRing::DEFAULT_CAPACITY)
         }
 
         fn new_from_bytes_and_capacity(s: &'a [u8], capacity: usize) -> Self {
-            Parser::with_buffer_capacity(s, capacity)
+            Self::with_buffer_capacity(s, capacity)
         }
     }
 
     impl<R> Parser<R>
     where
-        R: std::io::Read,
+        R: Read,
     {
         fn collect_owned(&mut self) -> super::Result<Vec<Token<Streaming<String>>>> {
             let mut v = vec![];
