@@ -171,6 +171,23 @@ where
         }
     }
 
+    /// Returns the next byte, if any are still in the valid string buffer
+    fn maybe_peek_byte(&mut self) -> Option<u8> {
+        self.buffer.get(self.n_offset_bytes).copied()
+    }
+
+    /// Peeks at the next byte and returns true if:
+    ///
+    /// - the next byte is '!' or '?', indicating a potential special tag (`<!...`, `<?...`)
+    /// - the buffer is empty (no next byte currently available, so we have to check for
+    ///   special tags the normal way)
+    fn maybe_special_tag_start_char(&mut self) -> MustUse<bool> {
+        match self.maybe_peek_byte() {
+            Some(b) => MustUse(b == b'!' || b == b'?'),
+            None => MustUse(true),
+        }
+    }
+
     fn require_or_else(&mut self, s: &str, e: impl FnOnce(usize) -> Error) -> Result<()> {
         if *abandon!(self.consume(s)) {
             Ok(())
@@ -693,44 +710,55 @@ where
         use {State::*, Token::*};
 
         if self.buffer.complete()? {
-            Ok(None)
-        } else if *self.buffer.consume("<")? {
+            return Ok(None);
+        }
+
+        if *self.buffer.consume("<")? {
             if *self.buffer.consume("/")? {
                 self.state = StreamElementCloseName;
-                self.dispatch_stream_element_close_name(StringRing::name)
-            } else if *self.buffer.consume("![CDATA[")? {
-                self.state = StreamCData;
-                self.dispatch_stream_cdata()
-            } else if *self.buffer.consume("!--")? {
-                self.state = StreamComment;
-                self.dispatch_stream_comment()
-            } else if *self.buffer.consume("?")? {
-                if *self.buffer.consume("xml")? {
-                    let n_space = self.buffer.consume_space()?;
-
-                    if n_space == 0 {
-                        // This is actually a processing instruction that starts with `xml`
-                        self.state = StreamProcessingInstructionName;
-                        Ok(Some(Token::ProcessingInstructionStart(Streaming::Partial(
-                            "xml",
-                        ))))
-                    } else {
-                        self.buffer.require("version")?;
-                        self.buffer.require("=")?;
-                        let quote = self.buffer.require_quote()?;
-
-                        self.state = StreamDeclarationVersion(quote);
-                        self.dispatch_stream_declaration_version(quote)
-                    }
-                } else {
-                    self.state = StreamProcessingInstructionName;
-                    self.dispatch_stream_processing_instruction_name(StringRing::name)
-                }
-            } else {
-                self.state = StreamElementOpenName;
-                self.dispatch_stream_element_open_name(StringRing::name)
+                return self.dispatch_stream_element_close_name(StringRing::name);
             }
-        } else if let Some(l) = self.buffer.space()? {
+
+            if *self.buffer.maybe_special_tag_start_char() {
+                if *self.buffer.consume("![CDATA[")? {
+                    self.state = StreamCData;
+                    return self.dispatch_stream_cdata();
+                }
+                if *self.buffer.consume("!--")? {
+                    self.state = StreamComment;
+                    return self.dispatch_stream_comment();
+                }
+                if *self.buffer.consume("?")? {
+                    if *self.buffer.consume("xml")? {
+                        let n_space = self.buffer.consume_space()?;
+
+                        if n_space == 0 {
+                            // This is actually a processing instruction that starts with `xml`
+                            self.state = StreamProcessingInstructionName;
+                            return Ok(Some(Token::ProcessingInstructionStart(
+                                Streaming::Partial("xml"),
+                            )));
+                        } else {
+                            self.buffer.require("version")?;
+                            self.buffer.require("=")?;
+                            let quote = self.buffer.require_quote()?;
+
+                            self.state = StreamDeclarationVersion(quote);
+                            return self.dispatch_stream_declaration_version(quote);
+                        }
+                    } else {
+                        self.state = StreamProcessingInstructionName;
+                        return self.dispatch_stream_processing_instruction_name(StringRing::name);
+                    }
+                }
+            }
+
+            // regular open tag
+            self.state = StreamElementOpenName;
+            return self.dispatch_stream_element_open_name(StringRing::name);
+        }
+
+        if let Some(l) = self.buffer.space()? {
             self.to_advance = l;
             let s = &self.buffer.as_str()[..l];
             Ok(Some(Space(Streaming::Complete(s))))
