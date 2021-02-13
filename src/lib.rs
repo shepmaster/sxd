@@ -8,7 +8,7 @@ use snafu::{ensure, Snafu};
 use std::{mem, str};
 
 #[async_trait(?Send)]
-trait DataSource {
+pub trait DataSource {
     async fn read(&mut self, buffer: &mut [u8]) -> usize;
 }
 
@@ -17,13 +17,13 @@ trait DataSource {
 /// This should **not** be used unless you are also using the parser
 /// from a completely synchronous context.
 #[derive(Debug)]
-struct ReadAdapter<R>(R);
+pub struct ReadAdapter<R>(R);
 
 impl<R> ReadAdapter<R>
 where
     R: std::io::Read,
 {
-    fn new(read: R) -> Self {
+    pub fn new(read: R) -> Self {
         Self(read)
     }
 }
@@ -266,7 +266,7 @@ enum State {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum Token<'a> {
+pub enum Token<'a> {
     /// `<foo`
     ElementOpenStart(&'a str),
     /// `>`
@@ -284,12 +284,12 @@ enum Token<'a> {
 }
 
 #[async_trait(?Send)]
-trait TokenSource {
+pub trait TokenSource {
     async fn next(&mut self) -> Option<Result<Token<'_>>>;
 }
 
 #[derive(Debug)]
-struct Parser<S> {
+pub struct Parser<S> {
     buffer: StringRing<S>,
     state: State,
     to_advance: usize,
@@ -414,11 +414,11 @@ impl<T> std::ops::DerefMut for MustUse<T> {
 }
 
 #[derive(Debug, Snafu)]
-enum Error {
+pub enum Error {
     RequiredTokenMissing { token: String },
 }
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[cfg(test)]
 mod test {
