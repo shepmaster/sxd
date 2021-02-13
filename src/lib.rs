@@ -730,6 +730,14 @@ where
                 self.state = StreamElementOpenName;
                 self.dispatch_stream_element_open_name(StringRing::name)
             }
+        } else if let Some(l) = self.buffer.space()? {
+            self.to_advance = l;
+            let s = &self.buffer.as_str()[..l];
+            Ok(Some(Space(Streaming::Complete(s))))
+        } else if let Some(l) = self.buffer.char_data()? {
+            self.to_advance = l;
+            let s = &self.buffer.as_str()[..l];
+            Ok(Some(CharData(Streaming::Complete(s))))
         } else if *self.buffer.consume("&#x")? {
             self.state = StreamReferenceHex;
             self.dispatch_stream_reference_hex()
@@ -739,14 +747,6 @@ where
         } else if *self.buffer.consume("&")? {
             self.state = StreamReferenceNamed;
             self.dispatch_stream_reference_named(StringRing::name)
-        } else if let Some(l) = self.buffer.space()? {
-            self.to_advance = l;
-            let s = &self.buffer.as_str()[..l];
-            Ok(Some(Space(Streaming::Complete(s))))
-        } else if let Some(l) = self.buffer.char_data()? {
-            self.to_advance = l;
-            let s = &self.buffer.as_str()[..l];
-            Ok(Some(CharData(Streaming::Complete(s))))
         } else {
             let location = self.buffer.absolute_location();
             InvalidXml { location }.fail()
