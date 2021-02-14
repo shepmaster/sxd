@@ -72,7 +72,7 @@ where
 
     async fn min_str(&mut self, len: usize) -> Result<&str> {
         if self.n_utf8_bytes < len {
-            self.extend().await?;
+            abandon!(self.extend().await);
         }
         Ok(self.as_str())
     }
@@ -151,7 +151,7 @@ where
             match self.extend().await {
                 Ok(_) => {}
                 Err(Error::NoMoreInputAvailable) => return Ok(false),
-                error => error?,
+                Err(e) => return Err(e),
             }
         }
 
@@ -170,7 +170,7 @@ where
     async fn consume(&mut self, s: impl AsRef<str>) -> Result<MustUse<bool>> {
         let s = s.as_ref();
 
-        if self.starts_with(s).await? {
+        if abandon!(self.starts_with(s).await) {
             self.advance(s.len());
             Ok(MustUse(true))
         } else {
@@ -179,7 +179,7 @@ where
     }
 
     async fn require_or_else(&mut self, s: &str, e: impl FnOnce(usize) -> Error) -> Result<()> {
-        if *self.consume(s).await? {
+        if *abandon!(self.consume(s).await) {
             Ok(())
         } else {
             Err(e(self.absolute_location()))
@@ -196,9 +196,9 @@ where
     }
 
     async fn require_quote(&mut self) -> Result<Quote> {
-        if *self.consume(&Quote::Double).await? {
+        if *abandon!(self.consume(&Quote::Double).await) {
             Ok(Quote::Double)
-        } else if *self.consume(&Quote::Single).await? {
+        } else if *abandon!(self.consume(&Quote::Single).await) {
             Ok(Quote::Single)
         } else {
             let location = self.absolute_location();
@@ -210,7 +210,7 @@ where
     async fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<&str>> {
         let mut s = self.as_str();
         if s.is_empty() {
-            self.extend().await?;
+            abandon!(self.extend().await);
             s = self.as_str();
         }
 
@@ -222,7 +222,7 @@ where
 
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
     async fn char_data(&mut self) -> Result<Option<usize>> {
-        let s = self.some_str().await?;
+        let s = abandon!(self.some_str().await);
 
         let offset = match s.find(&['<', '&'][..]) {
             Some(0) => return Ok(None),
@@ -237,7 +237,7 @@ where
 
     /// Anything that's not `]]>`
     async fn cdata(&mut self) -> Result<Streaming<&str>> {
-        let s = self.min_str(3).await?;
+        let s = abandon!(self.min_str(3).await);
 
         match s.find("]]>") {
             Some(offset) => return Ok(Streaming::Complete(&s[..offset])),
@@ -251,7 +251,7 @@ where
     }
 
     async fn processing_instruction_value(&mut self) -> Result<Streaming<&str>> {
-        let s = self.min_str(2).await?;
+        let s = abandon!(self.min_str(2).await);
 
         match s.find("?>") {
             Some(offset) => Ok(Streaming::Complete(&s[..offset])),
@@ -263,7 +263,7 @@ where
     }
 
     async fn comment(&mut self) -> Result<Streaming<&str>> {
-        let s = self.min_str(2).await?;
+        let s = abandon!(self.min_str(2).await);
 
         match s.find("--") {
             Some(offset) => Ok(Streaming::Complete(&s[..offset])),
@@ -275,7 +275,7 @@ where
     }
 
     async fn space(&mut self) -> Result<Option<usize>> {
-        let s = self.some_str().await?;
+        let s = abandon!(self.some_str().await);
         match matching_bytes(s, char::is_space) {
             0 => Ok(None),
             len => Ok(Some(len)),
@@ -285,7 +285,7 @@ where
     async fn consume_space(&mut self) -> Result<usize> {
         let mut total = 0;
 
-        while let Some(len) = self.space().await? {
+        while let Some(len) = abandon!(self.space().await) {
             total += len;
             self.advance(len);
         }
@@ -302,7 +302,7 @@ where
     }
 
     async fn name(&mut self) -> Result<Streaming<&str>> {
-        let s = self.some_str().await?;
+        let s = abandon!(self.some_str().await);
 
         let mut c = s.char_indices();
 
@@ -334,7 +334,7 @@ where
 
     #[inline]
     async fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<&str>> {
-        let s = self.some_str().await?;
+        let s = abandon!(self.some_str().await);
 
         match matching_bytes(s, predicate) {
             offset if offset == s.len() => Ok(Streaming::Partial(s)),
