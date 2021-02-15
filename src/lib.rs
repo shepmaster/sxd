@@ -742,6 +742,7 @@ impl CoreParser {
         self.buffer.n_utf8_bytes = self.rollback_to.1;
     }
 
+    #[inline]
     pub fn next(&mut self) -> Option<Result<Token<Streaming<usize>>>> {
         use State::*;
 
