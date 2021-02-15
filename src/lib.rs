@@ -234,11 +234,12 @@ impl StringRing {
     fn char_data(&mut self) -> Result<Option<usize>> {
         let s = abandon!(self.some_str());
 
-        let offset = match s.find(&['<', '&'][..]) {
+        let offset = match s.as_bytes().iter().position(|&c| c == b'<' || c == b'&') {
             Some(0) => return Ok(None),
             Some(offset) => offset,
             None => s.len(),
         };
+
         // TODO: This probably doesn't work at a buffer boundary
         let offset = s[..offset].find("]]>").unwrap_or(offset);
 
@@ -286,9 +287,11 @@ impl StringRing {
 
     fn space(&mut self) -> Result<Option<usize>> {
         let s = abandon!(self.some_str());
-        match matching_bytes(s, char::is_space) {
-            0 => Ok(None),
-            len => Ok(Some(len)),
+
+        match s.as_bytes().iter().position(|c| !c.is_xml_space()) {
+            Some(0) => Ok(None),
+            Some(n) => Ok(Some(n)),
+            None => Ok(Some(s.len())), // all chars are whitespace
         }
     }
 
@@ -298,7 +301,12 @@ impl StringRing {
     fn consume_space(&mut self) -> Result<()> {
         let s = self.as_str();
 
-        let n_bytes_space = matching_bytes(s, char::is_space);
+        let n_bytes_space = s
+            .as_bytes()
+            .iter()
+            .position(|c| !c.is_xml_space())
+            .unwrap_or_else(|| s.len());
+
         let all_space = n_bytes_space == s.len();
 
         self.advance(n_bytes_space);
@@ -308,11 +316,13 @@ impl StringRing {
     }
 
     fn reference_decimal(&mut self) -> Result<Streaming<usize>> {
-        self.while_char(char::is_ascii_digit)
+        // SAFETY: only checks ascii characters
+        unsafe { self.while_bytes(u8::is_ascii_digit) }
     }
 
     fn reference_hex(&mut self) -> Result<Streaming<usize>> {
-        self.while_char(char::is_ascii_hexdigit)
+        // SAFETY: only checks ascii characters
+        unsafe { self.while_bytes(u8::is_ascii_hexdigit) }
     }
 
     fn name(&mut self) -> Result<Streaming<usize>> {
@@ -355,6 +365,20 @@ impl StringRing {
             offset => Ok(Streaming::Complete(offset)),
         }
     }
+
+    /// # Safety
+    ///
+    /// The caller has to make sure the remaining string is valid utf8
+    /// (= predicate may only check for ASCII).
+    #[inline]
+    unsafe fn while_bytes(&mut self, predicate: impl Fn(&u8) -> bool) -> Result<Streaming<usize>> {
+        let s = abandon!(self.some_str());
+
+        match s.as_bytes().iter().position(|c| !predicate(c)) {
+            None => Ok(Streaming::Partial(s.len())), // all bytes match
+            Some(offset) => Ok(Streaming::Complete(offset)),
+        }
+    }
 }
 
 #[inline]
@@ -364,6 +388,24 @@ fn matching_bytes(s: &str, predicate: impl Fn(&char) -> bool) -> usize {
         .last()
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0)
+}
+
+#[ext]
+impl u8 {
+    #[inline]
+    fn is_xml_space(&self) -> bool {
+        matches!(*self, b' ' | 9 | b'\r' | b'\n')
+    }
+
+    #[inline]
+    fn is_ascii_digit(&self) -> bool {
+        matches!(*self, b'0'..=b'9')
+    }
+
+    #[inline]
+    fn is_ascii_hexdigit(&self) -> bool {
+        matches!(*self, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')
+    }
 }
 
 #[ext]
