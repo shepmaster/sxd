@@ -292,15 +292,19 @@ impl StringRing {
         }
     }
 
-    fn consume_space(&mut self) -> Result<usize> {
-        let mut total = 0;
+    // Note that space amounts can be unbounded, which means that any
+    // use of this should likely occur at the beginning of a state
+    // dispatch.
+    fn consume_space(&mut self) -> Result<()> {
+        let s = self.as_str();
 
-        while let Some(len) = abandon!(self.space()) {
-            total += len;
-            self.advance(len);
-        }
+        let n_bytes_space = matching_bytes(s, char::is_space);
+        let all_space = n_bytes_space == s.len();
 
-        Ok(total)
+        self.advance(n_bytes_space);
+        ensure!(!all_space, NeedsMoreInputSpace);
+
+        Ok(())
     }
 
     fn reference_decimal(&mut self) -> Result<Streaming<usize>> {
@@ -432,22 +436,35 @@ impl char {
     }
 }
 
+// There are a number of `*Space` states. Larger concepts may contain
+// optional whitespace which may fill out the rest of the buffer. We
+// need to be able to exit our loop, allow the user to refill the
+// buffer, then resume parsing without losing our place. Each unique
+// state provides a resumption point.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum State {
     Initial,
 
+    AfterDeclarationOpen,
+    AfterDeclarationOpenSpace,
     StreamDeclarationVersion(Quote),
     AfterDeclarationVersion,
+    AfterDeclarationVersionSpace,
 
     StreamElementOpenName,
     AfterElementOpenName,
+    AfterElementOpenNameSpace,
 
     StreamAttributeName,
     AfterAttributeName,
+    AfterAttributeNameSpace,
+    AfterAttributeEquals,
+    AfterAttributeEqualsSpace,
     StreamAttributeValue(Quote),
 
     StreamElementCloseName,
     AfterElementCloseName,
+    AfterElementCloseNameSpace,
 
     StreamReferenceNamed,
     StreamReferenceDecimal,
@@ -456,6 +473,7 @@ enum State {
 
     StreamProcessingInstructionName,
     AfterProcessingInstructionName,
+    AfterProcessingInstructionNameSpace,
     StreamProcessingInstructionValue,
     AfterProcessingInstructionValue,
 
@@ -630,13 +648,14 @@ impl_token! {
 }
 
 type Tok = Token<Streaming<usize>>;
-type RollbackState = (usize, usize, State);
+type RollbackState = (usize, usize);
 
 #[derive(Debug)]
 pub struct CoreParser {
     buffer: StringRing,
     state: State,
     to_advance: usize,
+    rollback_to: RollbackState,
 }
 
 impl CoreParser {
@@ -649,6 +668,7 @@ impl CoreParser {
             buffer: StringRing::with_capacity(capacity),
             state: State::Initial,
             to_advance: 0,
+            rollback_to: (0, 0),
         }
     }
 
@@ -663,18 +683,21 @@ impl CoreParser {
         self.buffer.refill_using(f)
     }
 
-    fn rollback_state(&self) -> RollbackState {
-        (
-            self.buffer.n_offset_bytes,
-            self.buffer.n_utf8_bytes,
-            self.state,
-        )
+    // When we transition state without returning yet, we need to
+    // update where we should rollback to.
+    //
+    // Possible future perf: should only be needed when we immediately
+    // jump to another dispatch function. We also don't need to
+    // re-set the state at the start of `next`.
+    fn ratchet(&mut self, state: State) {
+        self.state = state;
+
+        self.rollback_to = (self.buffer.n_offset_bytes, self.buffer.n_utf8_bytes)
     }
 
-    fn rollback_to(&mut self, state: RollbackState) {
-        self.buffer.n_offset_bytes = state.0;
-        self.buffer.n_utf8_bytes = state.1;
-        self.state = state.2;
+    fn rollback(&mut self) {
+        self.buffer.n_offset_bytes = self.rollback_to.0;
+        self.buffer.n_utf8_bytes = self.rollback_to.1;
     }
 
     pub fn next(&mut self) -> Option<Result<Token<Streaming<usize>>>> {
@@ -683,32 +706,40 @@ impl CoreParser {
         let to_advance = mem::take(&mut self.to_advance);
         self.buffer.advance(to_advance);
 
-        let rollback_state = self.rollback_state();
+        self.ratchet(self.state);
 
         let token = match self.state {
             Initial => self.dispatch_initial(),
 
+            AfterDeclarationOpen => self.dispatch_after_declaration_open(),
+            AfterDeclarationOpenSpace => self.dispatch_after_declaration_open_space(),
             StreamDeclarationVersion(quote) => self.dispatch_stream_declaration_version(quote),
             AfterDeclarationVersion => self.dispatch_after_declaration_version(),
+            AfterDeclarationVersionSpace => self.dispatch_after_declaration_version_space(),
 
             StreamElementOpenName => {
                 self.dispatch_stream_element_open_name(StringRing::name_continuation)
             }
             AfterElementOpenName => self.dispatch_after_element_open_name(),
+            AfterElementOpenNameSpace => self.dispatch_after_element_open_name_space(),
 
             StreamAttributeName => {
                 self.dispatch_stream_attribute_name(StringRing::name_continuation)
             }
             AfterAttributeName => self.dispatch_after_attribute_name(),
+            AfterAttributeNameSpace => self.dispatch_after_attribute_name_space(),
+            AfterAttributeEquals => self.dispatch_after_attribute_equals(),
+            AfterAttributeEqualsSpace => self.dispatch_after_attribute_equals_space(),
             StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote),
 
             StreamElementCloseName => {
                 self.dispatch_stream_element_close_name(StringRing::name_continuation)
             }
             AfterElementCloseName => self.dispatch_after_element_close_name(),
+            AfterElementCloseNameSpace => self.dispatch_after_element_close_name_space(),
 
             StreamCData => self.dispatch_stream_cdata(),
-            State::AfterCData => self.dispatch_after_cdata(),
+            AfterCData => self.dispatch_after_cdata(),
 
             StreamReferenceNamed => {
                 self.dispatch_stream_reference_named(StringRing::name_continuation)
@@ -721,6 +752,9 @@ impl CoreParser {
                 self.dispatch_stream_processing_instruction_name(StringRing::name_continuation)
             }
             AfterProcessingInstructionName => self.dispatch_after_processing_instruction_name(),
+            AfterProcessingInstructionNameSpace => {
+                self.dispatch_after_processing_instruction_name_space()
+            }
             StreamProcessingInstructionValue => self.dispatch_stream_processing_instruction_value(),
             AfterProcessingInstructionValue => self.dispatch_after_processing_instruction_value(),
 
@@ -729,7 +763,7 @@ impl CoreParser {
         };
 
         if matches!(token, Err(Error::NeedsMoreInput)) {
-            self.rollback_to(rollback_state);
+            self.rollback();
         }
 
         token.transpose()
@@ -744,37 +778,32 @@ impl CoreParser {
 
         if *self.buffer.consume("<")? {
             if *self.buffer.consume("/")? {
-                self.state = StreamElementCloseName;
+                self.ratchet(StreamElementCloseName);
                 return self.dispatch_stream_element_close_name(StringRing::name);
             }
 
             if *self.buffer.maybe_special_tag_start_char() {
                 if *self.buffer.consume("![CDATA[")? {
-                    self.state = StreamCData;
+                    self.ratchet(StreamCData);
                     return self.dispatch_stream_cdata();
                 }
                 if *self.buffer.consume("!--")? {
-                    self.state = StreamComment;
+                    self.ratchet(StreamComment);
                     return self.dispatch_stream_comment();
                 }
                 if *self.buffer.consume("?")? {
                     if *self.buffer.consume_xml()? {
-                        self.buffer.consume_space()?;
-                        self.buffer.require("version")?;
-                        self.buffer.require("=")?;
-                        let quote = self.buffer.require_quote()?;
-
-                        self.state = StreamDeclarationVersion(quote);
-                        return self.dispatch_stream_declaration_version(quote);
+                        self.ratchet(AfterDeclarationOpen);
+                        return self.dispatch_after_declaration_open();
                     } else {
-                        self.state = StreamProcessingInstructionName;
+                        self.ratchet(StreamProcessingInstructionName);
                         return self.dispatch_stream_processing_instruction_name(StringRing::name);
                     }
                 }
             }
 
             // regular open tag
-            self.state = StreamElementOpenName;
+            self.ratchet(StreamElementOpenName);
             return self.dispatch_stream_element_open_name(StringRing::name);
         }
 
@@ -785,13 +814,13 @@ impl CoreParser {
             self.to_advance = l;
             Ok(Some(CharData(Streaming::Complete(l))))
         } else if *self.buffer.consume("&#x")? {
-            self.state = StreamReferenceHex;
+            self.ratchet(StreamReferenceHex);
             self.dispatch_stream_reference_hex()
         } else if *self.buffer.consume("&#")? {
-            self.state = StreamReferenceDecimal;
+            self.ratchet(StreamReferenceDecimal);
             self.dispatch_stream_reference_decimal()
         } else if *self.buffer.consume("&")? {
-            self.state = StreamReferenceNamed;
+            self.ratchet(StreamReferenceNamed);
             self.dispatch_stream_reference_named(StringRing::name)
         } else {
             let location = self.buffer.absolute_location();
@@ -799,15 +828,22 @@ impl CoreParser {
         }
     }
 
-    fn dispatch_after_declaration_version(&mut self) -> Result<Option<Tok>> {
-        use {State::*, Token::*};
+    fn dispatch_after_declaration_open(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterDeclarationOpenSpace,
+            Self::dispatch_after_declaration_open_space,
+        )
+    }
 
-        self.buffer.consume_space()?;
+    fn dispatch_after_declaration_open_space(&mut self) -> Result<Option<Tok>> {
+        use State::*;
 
-        self.buffer.require("?>")?;
+        self.buffer.require("version")?;
+        self.buffer.require("=")?;
+        let quote = self.buffer.require_quote()?;
 
-        self.state = Initial;
-        Ok(Some(DeclarationClose))
+        self.ratchet(StreamDeclarationVersion(quote));
+        return self.dispatch_stream_declaration_version(quote);
     }
 
     fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<Tok>> {
@@ -818,11 +854,27 @@ impl CoreParser {
         self.to_advance = *value.unify();
 
         if value.is_complete() {
-            self.state = AfterDeclarationVersion;
+            self.ratchet(AfterDeclarationVersion);
             self.to_advance += quote.as_ref().len(); // Include the closing quote
         }
 
         Ok(Some(DeclarationStart(value)))
+    }
+
+    fn dispatch_after_declaration_version(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterDeclarationVersionSpace,
+            Self::dispatch_after_declaration_version_space,
+        )
+    }
+
+    fn dispatch_after_declaration_version_space(&mut self) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        self.buffer.require("?>")?;
+
+        self.ratchet(Initial);
+        Ok(Some(DeclarationClose))
     }
 
     fn dispatch_stream_element_open_name(
@@ -840,18 +892,23 @@ impl CoreParser {
     }
 
     fn dispatch_after_element_open_name(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterElementOpenNameSpace,
+            Self::dispatch_after_element_open_name_space,
+        )
+    }
+
+    fn dispatch_after_element_open_name_space(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space()?;
-
         if *self.buffer.consume("/>")? {
-            self.state = Initial;
+            self.ratchet(Initial);
             Ok(Some(ElementSelfClose))
         } else if *self.buffer.consume(">")? {
-            self.state = Initial;
+            self.ratchet(Initial);
             Ok(Some(ElementOpenEnd))
         } else {
-            self.state = StreamAttributeName;
+            self.ratchet(StreamAttributeName);
             self.dispatch_stream_attribute_name(StringRing::name)
         }
     }
@@ -864,14 +921,34 @@ impl CoreParser {
     }
 
     fn dispatch_after_attribute_name(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterAttributeNameSpace,
+            Self::dispatch_after_attribute_name_space,
+        )
+    }
+
+    fn dispatch_after_attribute_name_space(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
-        self.buffer.consume_space()?;
         self.buffer.require("=")?;
-        self.buffer.consume_space()?;
+
+        self.ratchet(AfterAttributeEquals);
+        self.dispatch_after_attribute_equals()
+    }
+
+    fn dispatch_after_attribute_equals(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterAttributeEqualsSpace,
+            Self::dispatch_after_attribute_equals_space,
+        )
+    }
+
+    fn dispatch_after_attribute_equals_space(&mut self) -> Result<Option<Tok>> {
+        use State::*;
+
         let quote = self.buffer.require_quote()?;
 
-        self.state = StreamAttributeValue(quote);
+        self.ratchet(StreamAttributeValue(quote));
         self.dispatch_stream_attribute_value(quote)
     }
 
@@ -883,7 +960,7 @@ impl CoreParser {
         self.to_advance = *value.unify();
 
         if value.is_complete() {
-            self.state = AfterElementOpenName;
+            self.ratchet(AfterElementOpenName);
             self.to_advance += quote.as_ref().len() // Include the closing quote
         }
 
@@ -891,12 +968,18 @@ impl CoreParser {
     }
 
     fn dispatch_after_element_close_name(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterElementCloseNameSpace,
+            Self::dispatch_after_element_close_name_space,
+        )
+    }
+
+    fn dispatch_after_element_close_name_space(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
-        self.buffer.consume_space()?;
         self.buffer.require(">")?;
 
-        self.state = Initial;
+        self.ratchet(Initial);
         self.dispatch_initial()
     }
 
@@ -927,7 +1010,7 @@ impl CoreParser {
         use State::*;
 
         self.buffer.require(";")?;
-        self.state = Initial;
+        self.ratchet(Initial);
         self.dispatch_initial()
     }
 
@@ -943,15 +1026,20 @@ impl CoreParser {
     }
 
     fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterProcessingInstructionNameSpace,
+            Self::dispatch_after_processing_instruction_name_space,
+        )
+    }
+
+    fn dispatch_after_processing_instruction_name_space(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        self.buffer.consume_space()?;
-
         if *self.buffer.consume("?>")? {
-            self.state = Initial;
+            self.ratchet(Initial);
             Ok(Some(ProcessingInstructionEnd))
         } else {
-            self.state = State::StreamProcessingInstructionValue;
+            self.ratchet(StreamProcessingInstructionValue);
             self.dispatch_stream_processing_instruction_value()
         }
     }
@@ -969,7 +1057,7 @@ impl CoreParser {
 
         self.buffer.require("?>")?;
 
-        self.state = Initial;
+        self.ratchet(Initial);
         Ok(Some(ProcessingInstructionEnd))
     }
 
@@ -982,7 +1070,7 @@ impl CoreParser {
 
         self.buffer.require("]]>")?;
 
-        self.state = Initial;
+        self.ratchet(Initial);
         self.dispatch_initial()
     }
 
@@ -996,11 +1084,22 @@ impl CoreParser {
         self.buffer
             .require_or_else("-->", |location| DoubleHyphenInComment { location }.build())?;
 
-        self.state = Initial;
+        self.ratchet(Initial);
         self.dispatch_initial()
     }
 
     // ----------
+
+    fn consume_space(
+        &mut self,
+        next_state: State,
+        next_state_fn: impl FnOnce(&mut Self) -> Result<Option<Tok>>,
+    ) -> Result<Option<Tok>> {
+        self.buffer.consume_space()?;
+
+        self.ratchet(next_state);
+        next_state_fn(self)
+    }
 
     #[inline]
     fn stream_from_buffer(
@@ -1013,7 +1112,7 @@ impl CoreParser {
         self.to_advance = *value.unify();
 
         if value.is_complete() {
-            self.state = next_state;
+            self.ratchet(next_state);
         }
 
         Ok(Some(create(value)))
@@ -1066,6 +1165,8 @@ impl RequiredToken {
 #[derive(Debug, Snafu)]
 pub enum Error {
     NeedsMoreInput,
+    // This is used to avoid performing a state rollback
+    NeedsMoreInputSpace,
 
     #[snafu(display(
         "The {} bytes of input data, starting at byte {}, was not UTF-8",
@@ -1106,6 +1207,12 @@ pub enum Error {
     },
 }
 
+impl Error {
+    fn needs_more_input(&self) -> bool {
+        matches!(self, Error::NeedsMoreInput | Error::NeedsMoreInputSpace)
+    }
+}
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub struct Parser<R> {
@@ -1139,9 +1246,10 @@ where
 
         let v = loop {
             match parser.next() {
-                Some(Ok(v)) => break Some(Ok(v)),
-                None | Some(Err(Error::NeedsMoreInput)) => {}
+                None => { /* Get more data */ }
+                Some(Err(e)) if e.needs_more_input() => { /* Get more data */ }
                 Some(Err(e)) => break Some(Err(e)),
+                Some(Ok(v)) => break Some(Ok(v)),
             }
 
             let n_new_bytes = parser.refill_using(|buf| source.read(buf));
@@ -1755,6 +1863,170 @@ mod test {
         );
 
         Ok(())
+    }
+
+    /// These tests all focus on locations where arbitrary-length
+    /// space tokens might fill the entire buffer. Each of these needs
+    /// to result in a separate state so that we can properly resume
+    /// after the user refills the buffer.
+    mod space_fills_rest_of_buffer {
+        use super::*;
+
+        #[test]
+        fn after_declaration_open() -> Result {
+            for i in 1..=64 {
+                let input = format!("<?xml{}version='1.0' ?>", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "<?xml                  version='1.0' ?>";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+
+            let tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [DeclarationStart(Complete("1.0")), DeclarationClose],
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn after_declaration_version() -> Result {
+            for i in 1..=64 {
+                let input = format!("<?xml version='1.0'{}?>", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "<?xml version='1.0'                                            ?>";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+
+            let tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [DeclarationStart(Complete("1.0")), DeclarationClose],
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn after_open_element_name() -> Result {
+            for i in 1..=64 {
+                let input = format!("<a{}>", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "<a                                                             >";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(tokens, [ElementOpenStart(Complete("a")), ElementOpenEnd]);
+
+            Ok(())
+        }
+
+        #[test]
+        fn after_attribute_name() -> Result {
+            for i in 1..=64 {
+                let input = format!("<a b{}='c' />", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "<a b                           ='c' />";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Complete("a")),
+                    AttributeName(Complete("b")),
+                    AttributeValue(Complete("c")),
+                    ElementSelfClose,
+                ],
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn after_attribute_equal() -> Result {
+            for i in 1..=64 {
+                let input = format!("<a b={}'c' />", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "<a b=                              'c' />";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart(Complete("a")),
+                    AttributeName(Complete("b")),
+                    AttributeValue(Complete("c")),
+                    ElementSelfClose,
+                ],
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn after_close_element() -> Result {
+            for i in 1..=64 {
+                let input = format!("</a{}>", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "</a                               >";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(tokens, [ElementClose(Complete("a"))]);
+
+            Ok(())
+        }
+
+        #[test]
+        fn after_processing_instruction_name() -> Result {
+            for i in 1..=64 {
+                let input = format!("<?a{}?>", " ".repeat(i));
+                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+            }
+
+            let input = "<?a                               ?>";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
+
+            use {Streaming::*, Token::*};
+            assert_eq!(
+                tokens,
+                [
+                    ProcessingInstructionStart(Complete("a")),
+                    ProcessingInstructionEnd,
+                ],
+            );
+
+            Ok(())
+        }
     }
 
     #[test]
