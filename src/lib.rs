@@ -427,16 +427,12 @@ impl char {
     }
 
     #[inline]
-    fn is_name_start_char(self) -> bool {
-        if self.is_name_start_char_ascii() {
+    fn is_name_start_char_non_ascii(self) -> bool {
+        if matches!(self, '\u{C0}'..='\u{2FF}') && self != '\u{D7}' && self != '\u{F7}' {
             return true;
         }
-
         match self {
-            '\u{C0}'..='\u{D6}'
-            | '\u{D8}'..='\u{F6}'
-            | '\u{F8}'..='\u{2FF}'
-            | '\u{370}'..='\u{37D}'
+            '\u{370}'..='\u{37D}'
             | '\u{37F}'..='\u{1FFF}'
             | '\u{200C}'..='\u{200D}'
             | '\u{2070}'..='\u{218F}'
@@ -450,11 +446,16 @@ impl char {
     }
 
     #[inline]
-    fn is_name_char_ascii(&self) -> bool {
+    fn is_name_start_char(self) -> bool {
         if self.is_name_start_char_ascii() {
             return true;
         }
 
+        self.is_name_start_char_non_ascii()
+    }
+
+    #[inline]
+    fn is_name_non_start_char_ascii(&self) -> bool {
         match self {
             '-' | '.' | '0'..='9' => true,
             _ => false,
@@ -463,11 +464,15 @@ impl char {
 
     #[inline]
     fn is_name_char(&self) -> bool {
-        if self.is_name_char_ascii() {
+        if self.is_name_start_char_ascii() {
             return true;
         }
 
-        if self.is_name_start_char() {
+        if self.is_name_non_start_char_ascii() {
+            return true;
+        }
+
+        if self.is_name_start_char_non_ascii() {
             return true;
         }
 
