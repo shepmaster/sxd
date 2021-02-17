@@ -9,7 +9,9 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         let p = inc.join("libxml/parser.h");
-        builder = builder.header(p.display().to_string());
+        builder = builder
+            .header(p.display().to_string())
+            .clang_arg(format!("-I{}", inc.display()));
     }
 
     let builder = builder
