@@ -232,19 +232,40 @@ impl StringRing {
     }
 
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
-    fn char_data(&mut self) -> Result<Option<usize>> {
-        let s = abandon!(self.some_str());
+    fn char_data(&mut self) -> Result<Streaming<usize>> {
+        // 3 so we will be able to tell if we start with `]]>`
+        let mut s = abandon!(self.min_str(3)).as_bytes();
+        let mut running_offset = 0;
 
-        let offset = match s.as_bytes().iter().position(|&c| c == b'<' || c == b'&') {
-            Some(0) => return Ok(None),
-            Some(offset) => offset,
-            None => s.len(),
-        };
+        loop {
+            let inner = s.iter().position(|&c| c == b'<' || c == b'&' || c == b']');
 
-        // TODO: This probably doesn't work at a buffer boundary
-        let offset = s[..offset].find("]]>").unwrap_or(offset);
+            match inner {
+                None => break Ok(Streaming::Partial(running_offset + s.len())),
+                Some(inner_offset) => {
+                    let (head, tail) = s.split_at(inner_offset);
+                    if tail.starts_with(b"]") && tail.len() >= 3 {
+                        if tail.starts_with(b"]]>") {
+                            break Ok(Streaming::Complete(running_offset + head.len()));
+                        } else {
+                            running_offset += head.len() + 1; // Skip over the `]`
+                            s = &tail[1..];
+                        }
+                    } else {
+                        break Ok(Streaming::Complete(running_offset + head.len()));
+                    }
+                }
+            }
+        }
+    }
 
-        Ok(Some(offset))
+    fn first_char_data(&mut self) -> Result<Option<Streaming<usize>>> {
+        let v = abandon!(self.char_data());
+        if *v.unify() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(v))
+        }
     }
 
     /// Anything that's not `]]>`
@@ -525,6 +546,7 @@ enum State {
     StreamProcessingInstructionValue,
     AfterProcessingInstructionValue,
 
+    StreamCharData,
     StreamCData,
     AfterCData,
 
@@ -648,6 +670,7 @@ impl CoreParser {
             AfterElementCloseName => self.dispatch_after_element_close_name(),
             AfterElementCloseNameSpace => self.dispatch_after_element_close_name_space(),
 
+            StreamCharData => self.dispatch_stream_char_data(),
             StreamCData => self.dispatch_stream_cdata(),
             AfterCData => self.dispatch_after_cdata(),
 
@@ -720,9 +743,14 @@ impl CoreParser {
         if let Some(l) = self.buffer.space()? {
             self.to_advance = l;
             Ok(Some(Space(Streaming::Complete(l))))
-        } else if let Some(l) = self.buffer.char_data()? {
-            self.to_advance = l;
-            Ok(Some(CharData(Streaming::Complete(l))))
+        } else if let Some(v) = self.buffer.first_char_data()? {
+            self.to_advance = *v.unify();
+
+            if !v.is_complete() {
+                self.state = StreamCharData;
+            }
+
+            Ok(Some(CharData(v)))
         } else if *self.buffer.consume("&#x")? {
             self.ratchet(StreamReferenceHex);
             self.dispatch_stream_reference_hex()
@@ -969,6 +997,10 @@ impl CoreParser {
 
         self.ratchet(Initial);
         Ok(Some(ProcessingInstructionEnd))
+    }
+
+    fn dispatch_stream_char_data(&mut self) -> Result<Option<Tok>> {
+        self.stream_from_buffer(StringRing::char_data, State::Initial, Token::CharData)
     }
 
     fn dispatch_stream_cdata(&mut self) -> Result<Option<Tok>> {
@@ -1393,6 +1425,44 @@ mod test {
                 ElementOpenStart(Complete("a")),
                 ElementOpenEnd,
                 CharData(Complete("b")),
+                ElementClose(Complete("a")),
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn char_data_small_capacity() -> Result {
+        let tokens = Parser::new_from_str_and_min_capacity(r#"<a>01234567890123456789</a>"#)
+            .collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("a")),
+                ElementOpenEnd,
+                CharData(Partial("0123456789012")),
+                CharData(Complete("3456789")),
+                ElementClose(Complete("a"))
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn char_data_with_close_square_bracket() -> Result {
+        let tokens = Parser::new_from_str("<a>b]</a>").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("a")),
+                ElementOpenEnd,
+                CharData(Complete("b]")),
                 ElementClose(Complete("a")),
             ],
         );
