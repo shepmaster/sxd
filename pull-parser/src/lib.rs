@@ -418,16 +418,6 @@ impl u8 {
     fn is_xml_space(&self) -> bool {
         matches!(*self, b' ' | 9 | b'\r' | b'\n')
     }
-
-    #[inline]
-    fn is_ascii_digit(&self) -> bool {
-        matches!(*self, b'0'..=b'9')
-    }
-
-    #[inline]
-    fn is_ascii_hexdigit(&self) -> bool {
-        matches!(*self, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')
-    }
 }
 
 #[ext]
