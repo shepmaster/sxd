@@ -1,10 +1,11 @@
+use formatter::Formatter;
+use pull_parser::Parser;
 use std::{
     env,
     fs::File,
     io::{self, BufWriter, Read, Write},
     str::FromStr,
 };
-use sxd_pull_parser::Parser;
 
 type Error = Box<dyn std::error::Error>;
 type Result<T = (), E = Error> = std::result::Result<T, E>;
@@ -46,14 +47,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn stream_output(mut parser: Parser<impl Read>, mut out: impl Write) -> Result<usize> {
+fn stream_output(mut parser: Parser<impl Read>, out: impl Write) -> Result<usize> {
     let mut count = 0;
-    while let Some(v) = parser.next() {
-        let v = v?;
+    let mut fmt = Formatter::new(out);
 
+    while let Some(token) = parser.next() {
+        let token = token?;
         count += 1;
-
-        writeln!(out, "{:?}", v)?;
+        fmt.write_token(token)?;
     }
+
     Ok(count)
 }

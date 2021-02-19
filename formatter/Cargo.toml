@@ -1,5 +1,5 @@
 [package]
-name = "sxd-pull-parser"
+name = "sxd-formatter"
 version = "0.1.0"
 authors = ["Jake Goulding <jake.goulding@gmail.com>"]
 edition = "2018"
@@ -8,18 +8,3 @@ edition = "2018"
 
 [dependencies]
 token = { package = "sxd-token", path = "../token" }
-
-snafu = "0.6.10"
-easy-ext = "0.2.6"
-
-[dev-dependencies]
-iai = "0.1.1"
-criterion = "0.3.4"
-
-[[bench]]
-name = "benchmark_iai"
-harness = false
-
-[[bench]]
-name = "benchmark_criterion"
-harness = false

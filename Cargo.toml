@@ -12,7 +12,9 @@ debug = true
 [workspace]
 members = [
     "pull-parser",
+    "token",
 ]
 
 [dependencies]
-sxd-pull-parser = { path = "pull-parser" }
+pull-parser = { package = "sxd-pull-parser", path = "pull-parser" }
+formatter = { package = "sxd-formatter", path = "formatter" }
