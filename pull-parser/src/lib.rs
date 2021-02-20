@@ -221,11 +221,11 @@ impl StringRing {
         }
     }
 
-    /// Warning: This only works for single bytes!
-    fn consume_until(&mut self, needle: impl AsRef<str>) -> Result<Streaming<usize>> {
+    /// Warning: only ascii character allowed as needle (<= 127)
+    fn consume_bytes_until(&mut self, needle: u8) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match s.find(needle.as_ref()) {
+        match s.as_bytes().iter().position(|&c| c == needle) {
             Some(x) => Ok(Streaming::Complete(x)),
             None => Ok(Streaming::Partial(s.len())),
         }
@@ -557,6 +557,13 @@ impl Quote {
             Self::Double => '"',
         }
     }
+
+    fn to_ascii_char(&self) -> u8 {
+        match self {
+            Self::Single => b'\'',
+            Self::Double => b'"',
+        }
+    }
 }
 
 impl AsRef<str> for Quote {
@@ -777,7 +784,7 @@ impl CoreParser {
     fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until(quote)?;
+        let value = self.buffer.consume_bytes_until(quote.to_ascii_char())?;
 
         self.to_advance = *value.unify();
 
@@ -883,7 +890,7 @@ impl CoreParser {
     fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_until(&quote)?;
+        let value = self.buffer.consume_bytes_until(quote.to_ascii_char())?;
 
         self.to_advance = *value.unify();
 
