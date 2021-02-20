@@ -1,0 +1,23 @@
+[package]
+name = "sxd-pull-parser"
+version = "0.1.0"
+authors = ["Jake Goulding <jake.goulding@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+snafu = "0.6.10"
+easy-ext = "0.2.6"
+
+[dev-dependencies]
+iai = "0.1.1"
+criterion = "0.3.4"
+
+[[bench]]
+name = "benchmark_iai"
+harness = false
+
+[[bench]]
+name = "benchmark_criterion"
+harness = false

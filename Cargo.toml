@@ -1,5 +1,5 @@
 [package]
-name = "sxd-pull-parser"
+name = "sxd"
 version = "0.1.0"
 authors = ["Jake Goulding <jake.goulding@gmail.com>"]
 edition = "2018"
@@ -11,22 +11,8 @@ debug = true
 
 [workspace]
 members = [
-    "dump",
+    "pull-parser",
 ]
 
-
 [dependencies]
-snafu = "0.6.10"
-easy-ext = "0.2.6"
-
-[dev-dependencies]
-iai = "0.1.1"
-criterion = "0.3.4"
-
-[[bench]]
-name = "benchmark_iai"
-harness = false
-
-[[bench]]
-name = "benchmark_criterion"
-harness = false
+sxd-pull-parser = { path = "pull-parser" }
