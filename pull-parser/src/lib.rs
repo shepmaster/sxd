@@ -635,6 +635,10 @@ impl CoreParser {
         let to_advance = mem::take(&mut self.to_advance);
         self.buffer.advance(to_advance);
 
+        if self.buffer.complete() {
+            return None;
+        }
+
         self.ratchet(self.state);
 
         let token = match self.state {
@@ -701,10 +705,6 @@ impl CoreParser {
 
     fn dispatch_initial(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
-
-        if self.buffer.complete() {
-            return Ok(None);
-        }
 
         if *self.buffer.consume("<")? {
             if *self.buffer.consume("/")? {
@@ -1649,6 +1649,16 @@ mod test {
                 Comment(Complete("aaaaaaaa")),
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn comment_unclosed() -> Result {
+        let tokens = Parser::new_from_str(r##"<!--hello"##).collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [Comment(Partial("hello"))]);
 
         Ok(())
     }
