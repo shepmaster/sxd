@@ -58,11 +58,23 @@ impl StringRing {
 
     /// Tries to return a string with the given byte length, but if
     /// the input is exhausted, the returned string may be shorter.
-    fn min_str(&mut self, len: usize) -> Result<&str> {
+    fn weak_min_str(&mut self, len: usize) -> Result<&str> {
         ensure!(
             self.n_utf8_bytes >= len || self.source_exhausted,
             NeedsMoreInput
         );
+        Ok(self.as_str())
+    }
+
+    fn min_str(&mut self, len: usize) -> Result<&str> {
+        if self.n_utf8_bytes < len {
+            if self.source_exhausted {
+                return InputExhausted.fail();
+            } else {
+                return NeedsMoreInput.fail();
+            }
+        }
+
         Ok(self.as_str())
     }
 
@@ -136,7 +148,7 @@ impl StringRing {
     }
 
     fn starts_with(&mut self, needle: &str) -> Result<bool> {
-        let s = abandon!(self.min_str(needle.len()));
+        let s = abandon!(self.weak_min_str(needle.len()));
         Ok(s.starts_with(needle))
     }
 
@@ -161,7 +173,7 @@ impl StringRing {
     }
 
     fn consume_xml(&mut self) -> Result<MustUse<bool>> {
-        let s = abandon!(self.min_str(4));
+        let s = abandon!(self.weak_min_str(4));
 
         if let Some(x) = s.strip_prefix("xml") {
             if x.starts_with(|c: char| c.is_space()) {
@@ -234,7 +246,7 @@ impl StringRing {
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
     fn char_data(&mut self) -> Result<Streaming<usize>> {
         // 3 so we will be able to tell if we start with `]]>`
-        let mut s = abandon!(self.min_str(3)).as_bytes();
+        let mut s = abandon!(self.weak_min_str(3)).as_bytes();
         let mut running_offset = 0;
 
         loop {
@@ -1106,6 +1118,7 @@ pub enum Error {
     NeedsMoreInput,
     // This is used to avoid performing a state rollback
     NeedsMoreInputSpace,
+    InputExhausted,
 
     #[snafu(display(
         "The {} bytes of input data, starting at byte {}, was not UTF-8",
@@ -1622,6 +1635,16 @@ mod test {
                 ProcessingInstructionEnd
             ],
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn processing_instruction_unclosed() -> Result {
+        let tokens = Parser::new_from_str(r"<?a").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(tokens, [ProcessingInstructionStart(Partial("a"))]);
 
         Ok(())
     }
