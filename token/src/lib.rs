@@ -17,6 +17,7 @@ macro_rules! impl_token {
 
         impl<$g> $e_name<$g> {
             #[allow(non_snake_case)]
+            #[inline]
             pub fn map<U>(self, f: impl FnOnce($g) -> U) ->  $e_name<U> {
                 use $e_name::*;
 
@@ -30,6 +31,7 @@ macro_rules! impl_token {
         where
             $g: PartialEq<U>,
         {
+            #[inline]
             fn eq(&self, other: &$e_name<U>) -> bool {
                 use $e_name::*;
 
@@ -103,10 +105,12 @@ pub enum Streaming<T> {
 }
 
 impl<T> Streaming<T> {
+    #[inline]
     pub fn is_complete(&self) -> bool {
         matches!(self, Streaming::Complete(_))
     }
 
+    #[inline]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Streaming<U> {
         use Streaming::*;
 
@@ -116,6 +120,7 @@ impl<T> Streaming<T> {
         }
     }
 
+    #[inline]
     pub fn unify(&self) -> &T {
         use Streaming::*;
 
@@ -130,6 +135,7 @@ impl<T, U> PartialEq<Streaming<U>> for Streaming<T>
 where
     T: PartialEq<U>,
 {
+    #[inline]
     fn eq(&self, other: &Streaming<U>) -> bool {
         match (self, other) {
             (Streaming::Partial(a), Streaming::Partial(b)) => a == b,
@@ -143,6 +149,7 @@ impl<T> fmt::Display for Streaming<T>
 where
     T: fmt::Display,
 {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.unify().fmt(f)
     }
