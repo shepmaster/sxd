@@ -8,7 +8,6 @@ edition = "2018"
 members = [
     "using-afl",
     "using-proptest",
-    "using-libfuzzer",
 ]
 
 [dependencies]
