@@ -1167,6 +1167,7 @@ impl Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+#[derive(Debug)]
 pub struct Parser<R> {
     source: R,
     parser: CoreParser,
@@ -1219,6 +1220,122 @@ where
         };
 
         v.map(move |t| t.map(move |t| t.map(move |t| t.map(move |t| &parser.as_str()[..t]))))
+    }
+}
+
+#[derive(Debug, Default)]
+struct FuseCore {
+    current: Option<Token<String>>,
+}
+
+impl FuseCore {
+    fn push(&mut self, t: Token<Streaming<&str>>) -> Option<Token<String>> {
+        use {Streaming::*, Token::*};
+
+        let Self { current } = self;
+
+        macro_rules! fuse_tokens {
+            ($($vname:ident $(($field:ident))?,)*) => {
+                match t {
+                    $(
+                        fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?)
+                            ,)*
+                }
+            };
+
+            (@pat $vname:ident $field:ident) => { $vname($field) };
+            (@arm $vname:ident $field:ident) => {
+                match $field {
+                    Partial(x) => {
+                        match current {
+                            Some($vname(s)) => {
+                                s.push_str(x);
+                                None
+                            },
+                            Some(other) => unreachable!("Was processing {:?} but didn't see complete before seeing {:?}", other, $field),
+                            None => {
+                                *current = Some($vname(x.to_string()));
+                                None
+                            }
+                        }
+                    },
+                    Complete(x) => {
+                        match current.take() {
+                            Some($vname(mut s)) => {
+                                s.push_str(x);
+                                Some($vname(s))
+                            }
+                            Some(other) => unreachable!("Was processing {:?} but didn't see complete before seeing {:?}", other, $field),
+                            None => Some($vname(x.to_string())),
+                        }
+                    },
+                }
+            };
+
+            (@pat $vname:ident) => { $vname };
+            (@arm $vname:ident) => { Some($vname) };
+        }
+
+        fuse_tokens! {
+            DeclarationStart(val),
+            DeclarationClose,
+
+            ElementOpenStart(val),
+            ElementOpenEnd,
+            ElementSelfClose,
+            ElementClose(val),
+
+            AttributeName(val),
+            AttributeValue(val),
+
+            CharData(val),
+            CData(val),
+            Space(val),
+
+            ReferenceNamed(val),
+            ReferenceDecimal(val),
+            ReferenceHex(val),
+
+            ProcessingInstructionStart(val),
+            ProcessingInstructionValue(val),
+            ProcessingInstructionEnd,
+
+            Comment(val),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Fuse<R> {
+    inner: Parser<R>,
+    core: FuseCore,
+}
+
+impl<R> Fuse<R>
+where
+    R: Read,
+{
+    pub fn new(inner: Parser<R>) -> Self {
+        Self {
+            inner,
+            core: Default::default(),
+        }
+    }
+
+    pub fn next(&mut self) -> Option<Result<Token<String>>> {
+        let Self { inner, core } = self;
+        while let Some(t) = inner.next() {
+            match t {
+                Ok(t) => {
+                    if let Some(t) = core.push(t) {
+                        return Some(Ok(t));
+                    }
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+
+        None
     }
 }
 
@@ -2063,6 +2180,31 @@ mod test {
         Ok(())
     }
 
+    mod fuse {
+        use super::*;
+
+        #[test]
+        fn combines_split_tokens() -> Result {
+            let tokens = Fuse::new(Parser::new_from_str_and_min_capacity(
+                "<aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb='cccccccccccccccccccc' />",
+            ))
+            .collect()?;
+
+            use Token::*;
+            assert_eq!(
+                tokens,
+                [
+                    ElementOpenStart("aaaaaaaaaaaaaaaaaaaa"),
+                    AttributeName("bbbbbbbbbbbbbbbbbbbb"),
+                    AttributeValue("cccccccccccccccccccc"),
+                    ElementSelfClose
+                ],
+            );
+
+            Ok(())
+        }
+    }
+
     impl<'a> Parser<&'a [u8]> {
         fn new_from_str(s: &'a str) -> Self {
             Self::new_from_str_and_capacity(s, StringRing::DEFAULT_CAPACITY)
@@ -2096,99 +2238,18 @@ mod test {
             }
             Ok(v)
         }
+    }
 
-        fn collect_fused(&mut self) -> super::Result<Vec<Token<String>>> {
-            use {Streaming::*, Token::*};
-
-            let mut vv = vec![];
-            let mut current: Option<Token<String>> = None;
-
+    impl<R> Fuse<R>
+    where
+        R: Read,
+    {
+        fn collect(&mut self) -> super::Result<Vec<Token<String>>> {
+            let mut v = vec![];
             while let Some(t) = self.next() {
-                let t = t?;
-
-                macro_rules! fuse_tokens {
-                    ($($vname:ident $(($field:ident))?,)*) => {
-                        match t {
-                            $(
-                                fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?)
-                            ,)*
-                        }
-                    };
-
-                    (@pat $vname:ident $field:ident) => { $vname($field) };
-                    (@arm $vname:ident $field:ident) => {
-                        match $field {
-                            Partial(x) => {
-                                match &mut current {
-                                    Some($vname(s)) => s.push_str(x),
-                                    Some(other) => {
-                                        let other = mem::replace(other, $vname(x.to_string()));
-                                        vv.push(other);
-                                    }
-                                    None => current = Some($vname(x.to_string())),
-                                }
-                            },
-                            Complete(x) => {
-                                match current.take() {
-                                    Some($vname(mut s)) => {
-                                        s.push_str(x);
-                                        vv.push($vname(s));
-                                    }
-                                    Some(other) => {
-                                        vv.push(other);
-                                        vv.push($vname(x.to_string()));
-                                    }
-                                    None => {
-                                        vv.push($vname(x.to_string()));
-                                    }
-                                }
-                            },
-                        }
-                    };
-
-                    (@pat $vname:ident) => { $vname };
-                    (@arm $vname:ident) => {
-                        match current.take() {
-                            Some(other) => {
-                                vv.push(other);
-                                vv.push($vname);
-                            }
-                            None => {
-                                vv.push($vname);
-                            }
-                        }
-                    };
-                }
-
-                fuse_tokens! {
-                    DeclarationStart(val),
-                    DeclarationClose,
-
-                    ElementOpenStart(val),
-                    ElementOpenEnd,
-                    ElementSelfClose,
-                    ElementClose(val),
-
-                    AttributeName(val),
-                    AttributeValue(val),
-
-                    CharData(val),
-                    CData(val),
-                    Space(val),
-
-                    ReferenceNamed(val),
-                    ReferenceDecimal(val),
-                    ReferenceHex(val),
-
-                    ProcessingInstructionStart(val),
-                    ProcessingInstructionValue(val),
-                    ProcessingInstructionEnd,
-
-                    Comment(val),
-                }
+                v.push(t?);
             }
-
-            Ok(vv)
+            Ok(v)
         }
     }
 }
