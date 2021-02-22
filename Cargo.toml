@@ -19,8 +19,11 @@ members = [
     "pull-parser",
     "string-slab",
     "token",
+    "validation",
 ]
 
 [dependencies]
+token = { package = "sxd-token", path = "token" }
 pull-parser = { package = "sxd-pull-parser", path = "pull-parser" }
 formatter = { package = "sxd-formatter", path = "formatter" }
+validation = { package = "sxd-validation", path = "validation" }

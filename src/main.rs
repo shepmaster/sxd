@@ -6,6 +6,7 @@ use std::{
     io::{self, BufWriter, Read, Write},
     str::FromStr,
 };
+use validation::Validator;
 
 type Error = Box<dyn std::error::Error>;
 type Result<T = (), E = Error> = std::result::Result<T, E>;
@@ -47,13 +48,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn stream_output(mut parser: Parser<impl Read>, out: impl Write) -> Result<usize> {
+fn stream_output(parser: Parser<impl Read>, out: impl Write) -> Result<usize> {
     let mut count = 0;
+    let mut validator = Validator::new(parser);
     let mut fmt = Formatter::new(out);
 
-    while let Some(token) = parser.next() {
+    while let Some(token) = validator.next() {
         let token = token?;
         count += 1;
+
+        // FIXME: remove the map
+        let token = token.map(|t| token::Streaming::Complete(t));
+
         fmt.write_token(token)?;
     }
 

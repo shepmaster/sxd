@@ -1,0 +1,14 @@
+[package]
+name = "sxd-validation"
+version = "0.1.0"
+authors = ["Jake Goulding <jake.goulding@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
+token = { package = "sxd-token", path = "../token" }
+string-slab = { package = "sxd-string-slab", path = "../string-slab" }
+
+snafu = "0.6.10"
