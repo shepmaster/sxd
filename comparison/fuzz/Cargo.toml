@@ -26,3 +26,9 @@ name = "lf_parses_what_libxml2_parses"
 path = "fuzz_targets/parses_what_libxml2_parses.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "lf_fails_what_libxml2_fails"
+path = "fuzz_targets/fails_what_libxml2_fails.rs"
+test = false
+doc = false

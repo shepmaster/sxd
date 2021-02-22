@@ -8,3 +8,15 @@ edition = "2018"
 comparison = { path = ".." }
 
 afl = "0.8.0"
+
+[[bin]]
+name = "afl_parses_what_libxml2_parses"
+path = "src/parses_what_libxml2_parses.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "afl_fails_what_libxml2_fails"
+path = "src/fails_what_libxml2_fails.rs"
+test = false
+doc = false
