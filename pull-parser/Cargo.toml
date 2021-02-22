@@ -11,6 +11,7 @@ token = { package = "sxd-token", path = "../token" }
 
 snafu = "0.6.10"
 easy-ext = "0.2.6"
+memchr = "2.3.4"
 
 [dev-dependencies]
 iai = "0.1.1"

@@ -237,7 +237,7 @@ impl StringRing {
     fn consume_bytes_until(&mut self, needle: u8) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match s.as_bytes().iter().position(|&c| c == needle) {
+        match memchr::memchr(needle, s.as_bytes()) {
             Some(x) => Ok(Streaming::Complete(x)),
             None => Ok(Streaming::Partial(s.len())),
         }
@@ -250,7 +250,7 @@ impl StringRing {
         let mut running_offset = 0;
 
         loop {
-            let inner = s.iter().position(|&c| c == b'<' || c == b'&' || c == b']');
+            let inner = memchr::memchr3(b'<', b'&', b']', s);
 
             match inner {
                 None => break Ok(Streaming::Partial(running_offset + s.len())),
