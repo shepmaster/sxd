@@ -176,7 +176,8 @@ impl StringRing {
         let s = abandon!(self.weak_min_str(4));
 
         if let Some(x) = s.strip_prefix("xml") {
-            if x.starts_with(|c: char| c.is_space()) {
+            // index 0 is always available since min_str(4)
+            if x.as_bytes()[0].is_xml_space() {
                 self.advance(4);
                 Ok(MustUse(true))
             } else {
@@ -434,14 +435,6 @@ impl u8 {
 
 #[ext]
 impl char {
-    #[inline]
-    fn is_space(&self) -> bool {
-        match self {
-            '\u{20}' | '\u{9}' | '\u{D}' | '\u{A}' => true,
-            _ => false,
-        }
-    }
-
     #[inline]
     fn is_name_start_char_ascii(self) -> bool {
         match self {
