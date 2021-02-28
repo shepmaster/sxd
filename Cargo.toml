@@ -17,6 +17,7 @@ lto = "thin"
 [workspace]
 members = [
     "pull-parser",
+    "string-slab",
     "token",
 ]
 
