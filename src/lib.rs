@@ -7,6 +7,7 @@ use hashbrown::HashSet;
 use std::{
     borrow::Borrow,
     cell::RefCell,
+    cmp::Ordering,
     collections::LinkedList,
     hash::{Hash, Hasher},
     mem,
@@ -178,6 +179,34 @@ impl Drop for StringSlab {
 /// Use [`UnsafeArena::as_str`] if you need the string data.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct UnsafeKey(RawStr);
+
+impl UnsafeKey {
+    fn compare_key(&self) -> (usize, *const u8) {
+        let RawStr(ptr, len) = self.0;
+        (len, ptr)
+    }
+}
+
+impl Hash for UnsafeKey {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        self.compare_key().hash(state)
+    }
+}
+
+impl PartialOrd for UnsafeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for UnsafeKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.compare_key().cmp(&other.compare_key())
+    }
+}
 
 /// A string interning pool.
 #[derive(Debug)]
@@ -380,7 +409,7 @@ impl Index<CheckedKey> for CheckedArena {
 /// An opaque handle to an interned string.
 ///
 /// Use [`CheckedArena::as_str`] if you need the string data.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CheckedKey(*const RefCell<UnsafeArena>, UnsafeKey);
 
 #[cfg(test)]
