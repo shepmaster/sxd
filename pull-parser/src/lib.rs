@@ -1338,6 +1338,17 @@ mod test {
 
     type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+    macro_rules! assert_error {
+        ($e:expr, $p:pat $(if $guard:expr)?) => {
+            assert!(
+                matches!($e, Err($p) $(if $guard)?),
+                "Expected {}, but got {:?}",
+                stringify!($p),
+                $e,
+            )
+        };
+    }
+
     #[test]
     fn xml_declaration() -> Result {
         let tokens = Parser::new_from_str(r#"<?xml version="1.0"?>"#).collect_owned()?;
