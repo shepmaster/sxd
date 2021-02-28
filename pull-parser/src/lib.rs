@@ -1296,6 +1296,13 @@ impl FuseCore {
             Comment(val),
         }
     }
+
+    fn finish(&mut self) -> Result<(), FuseError> {
+        match self.current.take() {
+            Some(_) => Incomplete.fail(),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1315,7 +1322,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<Token<String>>> {
+    pub fn next(&mut self) -> Option<Result<Token<String>, FuseError>> {
         let Self { inner, core } = self;
         while let Some(t) = inner.next() {
             match t {
@@ -1324,12 +1331,25 @@ where
                         return Some(Ok(t));
                     }
                 }
-                Err(e) => return Some(Err(e)),
+                Err(e) => return Some(Err(e.into())),
             }
         }
 
-        None
+        match core.finish() {
+            Ok(()) => None,
+            Err(e) => return Some(Err(e)),
+        }
     }
+}
+
+#[derive(Debug, Snafu)]
+pub enum FuseError {
+    Incomplete,
+
+    #[snafu(context(false))]
+    Parsing {
+        source: Error,
+    },
 }
 
 #[cfg(test)]
@@ -2200,7 +2220,7 @@ mod test {
                 AttributeValue(Partial("c")),
                 AttributeValue(Complete("c")),
                 ElementSelfClose,
-            ]);
+            ])?;
 
             assert_eq!(
                 tokens,
@@ -2211,6 +2231,15 @@ mod test {
                     ElementSelfClose,
                 ],
             );
+
+            Ok(())
+        }
+
+        #[test]
+        fn fail_unfinished_tokens() -> Result {
+            let error = FuseCore::fuse_all(vec![ElementOpenStart(Partial("a"))]);
+
+            assert_error!(error, FuseError::Incomplete);
 
             Ok(())
         }
@@ -2254,7 +2283,7 @@ mod test {
     impl FuseCore {
         fn fuse_all<'a>(
             tokens: impl IntoIterator<Item = Token<Streaming<&'a str>>>,
-        ) -> Vec<Token<String>> {
+        ) -> super::Result<Vec<Token<String>>, super::FuseError> {
             let mut collected = vec![];
             let mut me = Self::default();
 
@@ -2262,7 +2291,7 @@ mod test {
                 collected.extend(me.push(token));
             }
 
-            collected
+            me.finish().map(|()| collected)
         }
     }
 }

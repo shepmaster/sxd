@@ -120,8 +120,8 @@ pub enum Error {
     },
 
     #[snafu(context(false))]
-    Parsing {
-        source: pull_parser::Error,
+    Fusing {
+        source: pull_parser::FuseError,
     },
 }
 type Result<T, E = Error> = std::result::Result<T, E>;
