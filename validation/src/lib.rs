@@ -72,6 +72,21 @@ impl ValidatorCore {
 
         Ok(token)
     }
+
+    fn finish(&mut self) -> Result<()> {
+        let Self {
+            arena,
+            element_stack,
+            ..
+        } = self;
+
+        if let Some(opened) = element_stack.pop() {
+            let name = &arena[opened];
+            return ElementOpenedWithoutClose { name }.fail();
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -97,7 +112,10 @@ where
         let Self { parser, core } = self;
 
         match parser.next() {
-            None => None,
+            None => match core.finish() {
+                Ok(()) => None,
+                Err(e) => Some(Err(e)),
+            },
             Some(Ok(v)) => Some(core.push(v)),
             Some(e) => Some(e.map_err(Into::into)),
         }
@@ -108,6 +126,9 @@ where
 pub enum Error {
     MustStartWithDeclarationOrElement,
 
+    ElementOpenedWithoutClose {
+        name: String,
+    },
     ElementSelfClosedWithoutOpen,
     ElementClosedWithoutOpen,
     ElementOpenAndCloseMismatched {
@@ -151,6 +172,13 @@ mod test {
     }
 
     #[test]
+    fn fail_unclosed_open() {
+        let e = ValidatorCore::validate_all(vec![ElementOpenStart("a")]);
+
+        assert_error!(&e, Error::ElementOpenedWithoutClose { name } if name == "a");
+    }
+
+    #[test]
     fn fail_duplicated_attribute_name() {
         let e = ValidatorCore::validate_all(vec![
             ElementOpenStart("a"),
@@ -180,7 +208,7 @@ mod test {
             for token in tokens {
                 me.push(token)?;
             }
-            Ok(())
+            me.finish()
         }
     }
 }
