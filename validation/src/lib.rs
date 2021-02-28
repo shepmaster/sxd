@@ -131,13 +131,23 @@ mod test {
     use super::*;
     use token::Token::*;
 
+    #[macro_export]
+    macro_rules! assert_error {
+        ($e:expr, $p:pat $(if $guard:expr)?) => {
+            assert!(
+                matches!($e, Err($p) $(if $guard)?),
+                "Expected {}, but got {:?}",
+                stringify!($p),
+                $e,
+            )
+        };
+    }
+
     #[test]
     fn fail_mismatched_open_and_close() {
         let e = ValidatorCore::validate_all(vec![ElementOpenStart("a"), ElementClose("b")]);
 
-        assert!(
-            matches!(e, Err(Error::ElementOpenAndCloseMismatched { open, close}) if open == "a" && close =="b")
-        );
+        assert_error!(&e, Error::ElementOpenAndCloseMismatched { open, close } if open == "a" && close == "b");
     }
 
     #[test]
@@ -151,14 +161,14 @@ mod test {
             ElementSelfClose,
         ]);
 
-        assert!(matches!(e, Err(Error::AttributeDuplicate { name }) if name =="b"));
+        assert_error!(&e, Error::AttributeDuplicate { name } if name == "b");
     }
 
     #[test]
     fn fail_does_not_start_with_declaration_or_element() {
         let e = ValidatorCore::validate_all(vec![ReferenceNamed("lt")]);
 
-        assert!(matches!(e, Err(Error::MustStartWithDeclarationOrElement)));
+        assert_error!(&e, Error::MustStartWithDeclarationOrElement);
     }
 
     impl ValidatorCore {
