@@ -86,6 +86,40 @@ impl ValidatorCore {
                 )
             }
 
+            CharData(v) => {
+                let v = v.as_ref();
+                ensure!(
+                    !element_stack.is_empty(),
+                    CharDataOutsideOfElement { text: v }
+                );
+            }
+            CData(v) => {
+                let v = v.as_ref();
+                ensure!(!element_stack.is_empty(), CDataOutsideOfElement { text: v });
+            }
+
+            ReferenceNamed(v) => {
+                let v = v.as_ref();
+                ensure!(
+                    !element_stack.is_empty(),
+                    ReferenceNamedOutsideOfElement { text: v }
+                );
+            }
+            ReferenceDecimal(v) => {
+                let v = v.as_ref();
+                ensure!(
+                    !element_stack.is_empty(),
+                    ReferenceDecimalOutsideOfElement { text: v }
+                );
+            }
+            ReferenceHex(v) => {
+                let v = v.as_ref();
+                ensure!(
+                    !element_stack.is_empty(),
+                    ReferenceHexOutsideOfElement { text: v }
+                );
+            }
+
             ProcessingInstructionStart(v) => {
                 let v = v.as_ref();
                 ensure!(!v.is_empty(), ProcessingInstructionNameEmpty);
@@ -154,6 +188,22 @@ pub enum Error {
         version: String,
     },
 
+    CharDataOutsideOfElement {
+        text: String,
+    },
+    CDataOutsideOfElement {
+        text: String,
+    },
+    ReferenceNamedOutsideOfElement {
+        text: String,
+    },
+    ReferenceDecimalOutsideOfElement {
+        text: String,
+    },
+    ReferenceHexOutsideOfElement {
+        text: String,
+    },
+
     ElementNameEmpty,
     AttributeNameEmpty,
     ProcessingInstructionNameEmpty,
@@ -201,6 +251,41 @@ mod test {
         let e = ValidatorCore::validate_all(vec![DeclarationStart("1.a")]);
 
         assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.a");
+    }
+
+    #[test]
+    fn fail_char_data_outside_element() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), CharData("a")]);
+
+        assert_error!(&e, Error::CharDataOutsideOfElement { text } if text == "a");
+    }
+
+    #[test]
+    fn fail_cdata_outside_element() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), CData("a")]);
+
+        assert_error!(&e, Error::CDataOutsideOfElement { text } if text == "a");
+    }
+
+    #[test]
+    fn fail_reference_named_outside_element() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), ReferenceNamed("a")]);
+
+        assert_error!(&e, Error::ReferenceNamedOutsideOfElement { text } if text == "a");
+    }
+
+    #[test]
+    fn fail_reference_decimal_outside_element() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), ReferenceDecimal("a")]);
+
+        assert_error!(&e, Error::ReferenceDecimalOutsideOfElement { text } if text == "a");
+    }
+
+    #[test]
+    fn fail_reference_hex_outside_element() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), ReferenceHex("a")]);
+
+        assert_error!(&e, Error::ReferenceHexOutsideOfElement { text } if text == "a");
     }
 
     #[test]
