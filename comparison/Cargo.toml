@@ -12,4 +12,5 @@ members = [
 
 [dependencies]
 sxd-pull-parser = { path = "../pull-parser" }
+sxd-validation = { path = "../validation" }
 libxml2-sys = { path = "libxml2-sys" }
