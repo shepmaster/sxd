@@ -11,6 +11,8 @@ pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
 token = { package = "sxd-token", path = "../token" }
 string-slab = { package = "sxd-string-slab", path = "../string-slab" }
 
+once_cell = { version = "1.7.0", default-features = false, features = ["std"] }
+regex = { version = "1.4.3", default-features = false, features = ["std"] }
 snafu = "0.6.10"
 
 [dev-dependencies]

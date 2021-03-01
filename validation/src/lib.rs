@@ -1,4 +1,6 @@
+use once_cell::sync::Lazy;
 use pull_parser::{Fuse, Parser};
+use regex::Regex;
 use snafu::{ensure, OptionExt, Snafu};
 use std::{collections::HashSet, io::Read};
 use string_slab::{CheckedArena, CheckedKey};
@@ -36,8 +38,19 @@ impl ValidatorCore {
         *count += 1;
 
         match &token {
-            // TODO: validate declaration version string
             // TODO: validate reference values are in-bounds
+            DeclarationStart(v) => {
+                static VALID_VERSION_STRING: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r#"^1\.[0-9]+$"#).unwrap());
+
+                let v = v.as_ref();
+
+                ensure!(
+                    VALID_VERSION_STRING.is_match(v),
+                    InvalidDeclarationVersion { version: v }
+                );
+            }
+
             ElementOpenStart(v) => {
                 let v = v.as_ref();
                 element_stack.push(arena.intern(v));
@@ -126,6 +139,10 @@ where
 pub enum Error {
     MustStartWithDeclarationOrElement,
 
+    InvalidDeclarationVersion {
+        version: String,
+    },
+
     ElementOpenedWithoutClose {
         name: String,
     },
@@ -162,6 +179,13 @@ mod test {
                 $e,
             )
         };
+    }
+
+    #[test]
+    fn fail_unknown_declaration_version() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.a")]);
+
+        assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.a");
     }
 
     #[test]
