@@ -2186,22 +2186,29 @@ mod test {
 
     mod fuse {
         use super::*;
+        use {Streaming::*, Token::*};
 
         #[test]
         fn combines_split_tokens() -> Result {
-            let tokens = Fuse::new(Parser::new_from_str_and_min_capacity(
-                "<aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb='cccccccccccccccccccc' />",
-            ))
-            .collect()?;
+            let tokens = FuseCore::fuse_all(vec![
+                ElementOpenStart(Partial("aaaaa")),
+                ElementOpenStart(Complete("aaaaa")),
+                AttributeName(Partial("")),
+                AttributeName(Partial("bbbbbbbbbb")),
+                AttributeName(Complete("")),
+                AttributeValue(Partial("c")),
+                AttributeValue(Partial("c")),
+                AttributeValue(Complete("c")),
+                ElementSelfClose,
+            ]);
 
-            use Token::*;
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart("aaaaaaaaaaaaaaaaaaaa"),
-                    AttributeName("bbbbbbbbbbbbbbbbbbbb"),
-                    AttributeValue("cccccccccccccccccccc"),
-                    ElementSelfClose
+                    ElementOpenStart("aaaaaaaaaa"),
+                    AttributeName("bbbbbbbbbb"),
+                    AttributeValue("ccc"),
+                    ElementSelfClose,
                 ],
             );
 
@@ -2244,16 +2251,18 @@ mod test {
         }
     }
 
-    impl<R> Fuse<R>
-    where
-        R: Read,
-    {
-        fn collect(&mut self) -> super::Result<Vec<Token<String>>> {
-            let mut v = vec![];
-            while let Some(t) = self.next() {
-                v.push(t?);
+    impl FuseCore {
+        fn fuse_all<'a>(
+            tokens: impl IntoIterator<Item = Token<Streaming<&'a str>>>,
+        ) -> Vec<Token<String>> {
+            let mut collected = vec![];
+            let mut me = Self::default();
+
+            for token in tokens {
+                collected.extend(me.push(token));
             }
-            Ok(v)
+
+            collected
         }
     }
 }
