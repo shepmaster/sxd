@@ -53,6 +53,9 @@ impl ValidatorCore {
 
             ElementOpenStart(v) => {
                 let v = v.as_ref();
+
+                ensure!(!v.is_empty(), ElementNameEmpty);
+
                 element_stack.push(arena.intern(v));
                 attributes.clear();
             }
@@ -74,10 +77,18 @@ impl ValidatorCore {
 
             AttributeName(v) => {
                 let v = v.as_ref();
+
+                ensure!(!v.is_empty(), AttributeNameEmpty);
+
                 ensure!(
                     attributes.insert(arena.intern(v)),
                     AttributeDuplicate { name: v },
                 )
+            }
+
+            ProcessingInstructionStart(v) => {
+                let v = v.as_ref();
+                ensure!(!v.is_empty(), ProcessingInstructionNameEmpty);
             }
 
             _ => {}
@@ -143,6 +154,10 @@ pub enum Error {
         version: String,
     },
 
+    ElementNameEmpty,
+    AttributeNameEmpty,
+    ProcessingInstructionNameEmpty,
+
     ElementOpenedWithoutClose {
         name: String,
     },
@@ -186,6 +201,35 @@ mod test {
         let e = ValidatorCore::validate_all(vec![DeclarationStart("1.a")]);
 
         assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.a");
+    }
+
+    #[test]
+    fn fail_element_name_empty() {
+        let e = ValidatorCore::validate_all(vec![ElementOpenStart("")]);
+
+        assert_error!(&e, Error::ElementNameEmpty);
+    }
+
+    #[test]
+    fn fail_attribute_name_empty() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeName(""),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::AttributeNameEmpty);
+    }
+
+    #[test]
+    fn fail_processing_instruction_name_empty() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ProcessingInstructionStart(""),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::ProcessingInstructionNameEmpty);
     }
 
     #[test]
