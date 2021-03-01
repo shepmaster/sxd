@@ -12,6 +12,7 @@ struct ValidatorCore {
     element_stack: Vec<CheckedKey>,
     attributes: HashSet<CheckedKey>,
     count: usize,
+    seen_one_element: bool,
 }
 
 impl ValidatorCore {
@@ -26,6 +27,7 @@ impl ValidatorCore {
             element_stack,
             attributes,
             count,
+            seen_one_element,
         } = self;
 
         if *count == 0 {
@@ -55,6 +57,11 @@ impl ValidatorCore {
                 let v = v.as_ref();
 
                 ensure!(!v.is_empty(), ElementNameEmpty);
+
+                if element_stack.is_empty() {
+                    ensure!(!*seen_one_element, MultipleTopLevelElements { name: v });
+                    *seen_one_element = true;
+                }
 
                 element_stack.push(arena.intern(v));
                 attributes.clear();
@@ -218,6 +225,10 @@ pub enum Error {
         close: String,
     },
 
+    MultipleTopLevelElements {
+        name: String,
+    },
+
     AttributeDuplicate {
         name: String,
     },
@@ -329,6 +340,18 @@ mod test {
         let e = ValidatorCore::validate_all(vec![ElementOpenStart("a")]);
 
         assert_error!(&e, Error::ElementOpenedWithoutClose { name } if name == "a");
+    }
+
+    #[test]
+    fn fail_multiple_top_level_elements() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementSelfClose,
+            ElementOpenStart("b"),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::MultipleTopLevelElements { name } if name == "b");
     }
 
     #[test]
