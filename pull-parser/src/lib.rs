@@ -137,6 +137,24 @@ impl StringRing {
             },
         };
 
+        // SAFETY: We just calculated how many bytes of the dangling
+        // bytes are valid UTF-8, so we don't need to do it again.
+        unsafe {
+            let s = str::from_utf8_unchecked(&dangling_bytes[..n_new_utf8_bytes]);
+            for (idx, c) in s.char_indices() {
+                ensure!(
+                    c.is_allowed_xml_char(),
+                    InvalidChar {
+                        location: self.n_retired_bytes
+                            + self.n_offset_bytes
+                            + self.n_utf8_bytes
+                            + idx,
+                        length: c.len_utf8()
+                    }
+                )
+            }
+        }
+
         self.n_dangling_bytes -= n_new_utf8_bytes;
         self.n_utf8_bytes += n_new_utf8_bytes;
 
@@ -433,8 +451,21 @@ impl u8 {
     }
 }
 
-#[ext]
+#[ext(pub XmlCharExt)]
 impl char {
+    #[inline]
+    fn is_allowed_xml_char(self) -> bool {
+        match self {
+            '\u{9}'
+            | '\u{A}'
+            | '\u{D}'
+            | '\u{20}'..='\u{D7FF}'
+            | '\u{E000}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{10FFFF}' => true,
+            _ => false,
+        }
+    }
+
     #[inline]
     fn is_name_start_char_ascii(self) -> bool {
         match self {
@@ -1112,6 +1143,16 @@ pub enum Error {
     // This is used to avoid performing a state rollback
     NeedsMoreInputSpace,
     InputExhausted,
+
+    #[snafu(display(
+        "The {} bytes of input data, starting at byte {}, are not allowed in XML",
+        length,
+        location,
+    ))]
+    InvalidChar {
+        location: usize,
+        length: usize,
+    },
 
     #[snafu(display(
         "The {} bytes of input data, starting at byte {}, was not UTF-8",
@@ -2185,6 +2226,42 @@ mod test {
         let error = Parser::new_from_str("<!------>").collect_owned();
 
         assert_error!(error, Error::DoubleHyphenInComment { location: 4 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_disallowed_ascii_char() -> Result {
+        let mut x = [b'a'; 20];
+        x[19] = 0x07;
+        let error = Parser::new_from_bytes_and_capacity(&x, 16).collect_owned();
+
+        assert_error!(
+            error,
+            Error::InvalidChar {
+                location: 19,
+                length: 1
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_disallowed_multibyte_char() -> Result {
+        let mut x = [b'a'; 20];
+        x[17] = 0xEF;
+        x[18] = 0xBF;
+        x[19] = 0xBF;
+        let error = Parser::new_from_bytes_and_capacity(&x, 16).collect_owned();
+
+        assert_error!(
+            error,
+            Error::InvalidChar {
+                location: 17,
+                length: 3
+            }
+        );
 
         Ok(())
     }

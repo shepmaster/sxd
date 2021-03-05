@@ -6,10 +6,6 @@ use comparison::libxml2_sys;
 fn main() {
     fuzz!(|data: &[u8]| {
         if let Ok(s) = std::str::from_utf8(data) {
-            if s.contains('\u{0}') {
-                return;
-            }
-
             let lx = match libxml2_sys::parse(&s) {
                 Ok(lx) => lx,
                 Err(_) => return,
