@@ -351,7 +351,7 @@ impl StringRing {
     // Note that space amounts can be unbounded, which means that any
     // use of this should likely occur at the beginning of a state
     // dispatch.
-    fn consume_space(&mut self) -> Result<()> {
+    fn consume_space(&mut self) -> Result<usize> {
         let s = self.as_str();
 
         let n_bytes_space = s
@@ -363,9 +363,9 @@ impl StringRing {
         let all_space = n_bytes_space == s.len();
 
         self.advance(n_bytes_space);
-        ensure!(!all_space, NeedsMoreInputSpace);
+        ensure!(!all_space, NeedsMoreInputSpace { n_bytes_space });
 
-        Ok(())
+        Ok(n_bytes_space)
     }
 
     fn reference_decimal(&mut self) -> Result<Streaming<usize>> {
@@ -546,6 +546,7 @@ enum State {
 
     StreamElementOpenName,
     AfterElementOpenName,
+    AfterElementOpenNameRequiredSpace,
     AfterElementOpenNameSpace,
 
     StreamAttributeName,
@@ -566,6 +567,7 @@ enum State {
 
     StreamProcessingInstructionName,
     AfterProcessingInstructionName,
+    AfterProcessingInstructionNameRequiredSpace,
     AfterProcessingInstructionNameSpace,
     StreamProcessingInstructionValue,
     AfterProcessingInstructionValue,
@@ -688,6 +690,9 @@ impl CoreParser {
                 self.dispatch_stream_element_open_name(StringRing::name_continuation)
             }
             AfterElementOpenName => self.dispatch_after_element_open_name(),
+            AfterElementOpenNameRequiredSpace => {
+                self.dispatch_after_element_open_name_required_space()
+            }
             AfterElementOpenNameSpace => self.dispatch_after_element_open_name_space(),
 
             StreamAttributeName => {
@@ -720,6 +725,9 @@ impl CoreParser {
                 self.dispatch_stream_processing_instruction_name(StringRing::name_continuation)
             }
             AfterProcessingInstructionName => self.dispatch_after_processing_instruction_name(),
+            AfterProcessingInstructionNameRequiredSpace => {
+                self.dispatch_after_processing_instruction_name_required_space()
+            }
             AfterProcessingInstructionNameSpace => {
                 self.dispatch_after_processing_instruction_name_space()
             }
@@ -861,6 +869,23 @@ impl CoreParser {
     }
 
     fn dispatch_after_element_open_name(&mut self) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        if *self.buffer.consume("/>")? {
+            self.ratchet(Initial);
+            Ok(Some(ElementSelfClose))
+        } else if *self.buffer.consume(">")? {
+            self.ratchet(Initial);
+            Ok(Some(ElementOpenEnd))
+        } else {
+            self.require_space(
+                AfterElementOpenNameRequiredSpace,
+                Self::dispatch_after_element_open_name_required_space,
+            )
+        }
+    }
+
+    fn dispatch_after_element_open_name_required_space(&mut self) -> Result<Option<Tok>> {
         self.consume_space(
             State::AfterElementOpenNameSpace,
             Self::dispatch_after_element_open_name_space,
@@ -995,6 +1020,20 @@ impl CoreParser {
     }
 
     fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        if *self.buffer.consume("?>")? {
+            self.ratchet(Initial);
+            Ok(Some(ProcessingInstructionEnd))
+        } else {
+            self.require_space(
+                AfterProcessingInstructionNameRequiredSpace,
+                Self::dispatch_after_processing_instruction_name_required_space,
+            )
+        }
+    }
+
+    fn dispatch_after_processing_instruction_name_required_space(&mut self) -> Result<Option<Tok>> {
         self.consume_space(
             State::AfterProcessingInstructionNameSpace,
             Self::dispatch_after_processing_instruction_name_space,
@@ -1062,6 +1101,29 @@ impl CoreParser {
     }
 
     // ----------
+
+    fn require_space(
+        &mut self,
+        next_state: State,
+        next_state_fn: impl FnOnce(&mut Self) -> Result<Option<Tok>>,
+    ) -> Result<Option<Tok>> {
+        match self.buffer.consume_space() {
+            Ok(0) => RequiredSpaceMissing {
+                location: self.buffer.absolute_location(),
+            }
+            .fail(),
+            Ok(_) => {
+                self.ratchet(next_state);
+                next_state_fn(self)
+            }
+            Err(e @ Error::NeedsMoreInputSpace { n_bytes_space: 0 }) => Err(e),
+            Err(e @ Error::NeedsMoreInputSpace { .. }) => {
+                self.ratchet(next_state);
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
+    }
 
     fn consume_space(
         &mut self,
@@ -1139,7 +1201,9 @@ impl RequiredToken {
 pub enum Error {
     NeedsMoreInput,
     // This is used to avoid performing a state rollback
-    NeedsMoreInputSpace,
+    NeedsMoreInputSpace {
+        n_bytes_space: usize,
+    },
     InputExhausted,
 
     #[snafu(display(
@@ -1172,6 +1236,11 @@ pub enum Error {
         location: usize,
     },
 
+    #[snafu(display("Required space but it was missing"))]
+    RequiredSpaceMissing {
+        location: usize,
+    },
+
     #[snafu(display(
         "Expected either a single or double quote around the attribute value at byte {}",
         location,
@@ -1193,7 +1262,10 @@ pub enum Error {
 
 impl Error {
     fn needs_more_input(&self) -> bool {
-        matches!(self, Error::NeedsMoreInput | Error::NeedsMoreInputSpace)
+        matches!(
+            self,
+            Error::NeedsMoreInput | Error::NeedsMoreInputSpace { .. }
+        )
     }
 }
 
@@ -2217,6 +2289,24 @@ mod test {
 
             Ok(())
         }
+    }
+
+    #[test]
+    fn fail_element_missing_space() -> Result {
+        let error = Parser::new_from_str(r"<a\b='c'>").collect_owned();
+
+        assert_error!(error, Error::RequiredSpaceMissing { location: 2 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_processing_instruction_missing_space() -> Result {
+        let error = Parser::new_from_str(r"<?a\b?>").collect_owned();
+
+        assert_error!(error, Error::RequiredSpaceMissing { location: 3 });
+
+        Ok(())
     }
 
     #[test]
