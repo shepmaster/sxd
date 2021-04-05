@@ -254,11 +254,10 @@ impl StringRing {
         }
     }
 
-    /// Warning: only ascii character allowed as needle (<= 127)
-    fn consume_bytes_until(&mut self, needle: u8) -> Result<Streaming<usize>> {
+    fn attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match memchr::memchr(needle, s.as_bytes()) {
+        match memchr::memchr3(b'<', b'&', quote_style.to_ascii_char(), s.as_bytes()) {
             Some(x) => Ok(Streaming::Complete(x)),
             None => Ok(Streaming::Partial(s.len())),
         }
@@ -556,7 +555,12 @@ enum State {
     AfterAttributeNameSpace,
     AfterAttributeEquals,
     AfterAttributeEqualsSpace,
-    StreamAttributeValue(Quote),
+    AfterAttributeOpenQuote(Quote),
+    StreamAttributeValueLiteral(Quote),
+    StreamAttributeValueReferenceHex(Quote),
+    StreamAttributeValueReferenceDecimal(Quote),
+    StreamAttributeValueReferenceNamed(Quote),
+    AfterAttributeValueReference(Quote),
 
     StreamElementCloseName,
     AfterElementCloseName,
@@ -704,7 +708,24 @@ impl CoreParser {
             AfterAttributeNameSpace => self.dispatch_after_attribute_name_space(),
             AfterAttributeEquals => self.dispatch_after_attribute_equals(),
             AfterAttributeEqualsSpace => self.dispatch_after_attribute_equals_space(),
-            StreamAttributeValue(quote) => self.dispatch_stream_attribute_value(quote),
+            AfterAttributeOpenQuote(quote) => self.dispatch_after_attribute_open_quote(quote),
+            StreamAttributeValueLiteral(quote) => {
+                self.dispatch_stream_attribute_value_literal(quote)
+            }
+            StreamAttributeValueReferenceHex(quote) => {
+                self.dispatch_stream_attribute_value_reference_hex(quote)
+            }
+            StreamAttributeValueReferenceDecimal(quote) => {
+                self.dispatch_stream_attribute_value_reference_decimal(quote)
+            }
+            StreamAttributeValueReferenceNamed(quote) => self
+                .dispatch_stream_attribute_value_reference_named(
+                    quote,
+                    StringRing::name_continuation,
+                ),
+            AfterAttributeValueReference(quote) => {
+                self.dispatch_after_attribute_value_reference(quote)
+            }
 
             StreamElementCloseName => {
                 self.dispatch_stream_element_close_name(StringRing::name_continuation)
@@ -828,7 +849,7 @@ impl CoreParser {
     fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_bytes_until(quote.to_ascii_char())?;
+        let value = self.buffer.attribute_value(quote)?;
 
         self.to_advance = *value.unify();
 
@@ -913,7 +934,7 @@ impl CoreParser {
         &mut self,
         f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
     ) -> Result<Option<Tok>> {
-        self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeName)
+        self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeStart)
     }
 
     fn dispatch_after_attribute_name(&mut self) -> Result<Option<Tok>> {
@@ -943,24 +964,92 @@ impl CoreParser {
         use State::*;
 
         let quote = self.buffer.require_quote()?;
-
-        self.ratchet(StreamAttributeValue(quote));
-        self.dispatch_stream_attribute_value(quote)
+        self.ratchet(AfterAttributeOpenQuote(quote));
+        self.dispatch_after_attribute_open_quote(quote)
     }
 
-    fn dispatch_stream_attribute_value(&mut self, quote: Quote) -> Result<Option<Tok>> {
+    fn dispatch_after_attribute_open_quote(&mut self, quote: Quote) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.consume_bytes_until(quote.to_ascii_char())?;
+        if *self.buffer.consume(quote)? {
+            self.ratchet(AfterElementOpenName);
+            Ok(Some(AttributeValueEnd))
+        } else if *self.buffer.consume("&#x")? {
+            self.ratchet(StreamAttributeValueReferenceHex(quote));
+            self.dispatch_stream_attribute_value_reference_hex(quote)
+        } else if *self.buffer.consume("&#")? {
+            self.ratchet(StreamAttributeValueReferenceDecimal(quote));
+            self.dispatch_stream_attribute_value_reference_decimal(quote)
+        } else if *self.buffer.consume("&")? {
+            self.ratchet(StreamAttributeValueReferenceNamed(quote));
+            self.dispatch_stream_attribute_value_reference_named(quote, StringRing::name)
+        } else if self.buffer.starts_with("<")? {
+            InvalidCharacterInAttribute {
+                location: self.buffer.absolute_location(),
+            }
+            .fail()
+        } else {
+            self.ratchet(StreamAttributeValueLiteral(quote));
+            self.dispatch_stream_attribute_value_literal(quote)
+        }
+    }
+
+    // -- todo: copy-pastad
+    fn dispatch_stream_attribute_value_reference_named(
+        &mut self,
+        quote: Quote,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<Tok>> {
+        self.stream_from_buffer(
+            f,
+            State::AfterAttributeValueReference(quote),
+            Token::AttributeValueReferenceNamed,
+        )
+    }
+
+    fn dispatch_stream_attribute_value_reference_decimal(
+        &mut self,
+        quote: Quote,
+    ) -> Result<Option<Tok>> {
+        self.stream_from_buffer(
+            StringRing::reference_decimal,
+            State::AfterAttributeValueReference(quote),
+            Token::AttributeValueReferenceDecimal,
+        )
+    }
+
+    fn dispatch_stream_attribute_value_reference_hex(
+        &mut self,
+        quote: Quote,
+    ) -> Result<Option<Tok>> {
+        self.stream_from_buffer(
+            StringRing::reference_hex,
+            State::AfterAttributeValueReference(quote),
+            Token::AttributeValueReferenceHex,
+        )
+    }
+
+    fn dispatch_after_attribute_value_reference(&mut self, quote: Quote) -> Result<Option<Tok>> {
+        use State::*;
+
+        self.buffer.require(";")?;
+        self.ratchet(AfterAttributeOpenQuote(quote));
+        self.dispatch_after_attribute_open_quote(quote)
+    }
+    // ---
+
+    fn dispatch_stream_attribute_value_literal(&mut self, quote: Quote) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        let value = self.buffer.attribute_value(quote)?;
 
         self.to_advance = *value.unify();
 
         if value.is_complete() {
-            self.ratchet(AfterElementOpenName);
-            self.to_advance += quote.as_ref().len() // Include the closing quote
+            self.ratchet(AfterAttributeOpenQuote(quote));
         }
 
-        Ok(Some(AttributeValue(value)))
+        Ok(Some(AttributeValueLiteral(value)))
     }
 
     fn dispatch_after_element_close_name(&mut self) -> Result<Option<Tok>> {
@@ -1251,6 +1340,11 @@ pub enum Error {
         location: usize,
     },
 
+    #[snafu(display("An invalid character is inside an attribute at byte {}", location))]
+    InvalidCharacterInAttribute {
+        location: usize,
+    },
+
     #[snafu(display("A double hyphen is inside a comment at byte {}", location,))]
     DoubleHyphenInComment {
         location: usize,
@@ -1344,8 +1438,8 @@ impl FuseCore {
             ($($vname:ident $(($field:ident))?,)*) => {
                 match t {
                     $(
-                        fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?)
-                            ,)*
+                        fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?),
+                    )*
                 }
             };
 
@@ -1391,8 +1485,12 @@ impl FuseCore {
             ElementSelfClose,
             ElementClose(val),
 
-            AttributeName(val),
-            AttributeValue(val),
+            AttributeStart(val),
+            AttributeValueLiteral(val),
+            AttributeValueReferenceNamed(val),
+            AttributeValueReferenceDecimal(val),
+            AttributeValueReferenceHex(val),
+            AttributeValueEnd,
 
             CharData(val),
             CData(val),
@@ -1566,8 +1664,9 @@ mod test {
             tokens,
             [
                 ElementOpenStart(Complete("alpha")),
-                AttributeName(Complete("a")),
-                AttributeValue(Complete("b")),
+                AttributeStart(Complete("a")),
+                AttributeValueLiteral(Complete("b")),
+                AttributeValueEnd,
                 ElementSelfClose,
             ],
         );
@@ -1588,11 +1687,11 @@ mod test {
             [
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
-                AttributeName(Partial("b01234567")),
-                AttributeName(Complete("890123456789")),
-                AttributeValue(Partial("c0")),
-                AttributeValue(Partial("1234567890123456")),
-                AttributeValue(Complete("789")),
+                AttributeStart(Partial("b01234567")),
+                AttributeStart(Complete("890123456789")),
+                AttributeValueLiteral(Partial("c012345678901234")),
+                AttributeValueLiteral(Complete("56789")),
+                AttributeValueEnd,
                 ElementSelfClose,
             ],
         );
@@ -1609,10 +1708,53 @@ mod test {
             tokens,
             [
                 ElementOpenStart(Complete("alpha")),
-                AttributeName(Complete("a")),
-                AttributeValue(Complete("b")),
-                AttributeName(Complete("c")),
-                AttributeValue(Complete("d")),
+                AttributeStart(Complete("a")),
+                AttributeValueLiteral(Complete("b")),
+                AttributeValueEnd,
+                AttributeStart(Complete("c")),
+                AttributeValueLiteral(Complete("d")),
+                AttributeValueEnd,
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_with_escaped_less_than_and_ampersand() -> Result {
+        let tokens = Parser::new_from_str("<a b='&lt;&amp;' />").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("a")),
+                AttributeStart(Complete("b")),
+                AttributeValueReferenceNamed(Complete("lt")),
+                AttributeValueReferenceNamed(Complete("amp")),
+                AttributeValueEnd,
+                ElementSelfClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_with_references() -> Result {
+        let tokens = Parser::new_from_str("<a b='&ten;&#10;&#x10;' />").collect_owned()?;
+
+        use {Streaming::*, Token::*};
+        assert_eq!(
+            tokens,
+            [
+                ElementOpenStart(Complete("a")),
+                AttributeStart(Complete("b")),
+                AttributeValueReferenceNamed(Complete("ten")),
+                AttributeValueReferenceDecimal(Complete("10")),
+                AttributeValueReferenceHex(Complete("10")),
+                AttributeValueEnd,
                 ElementSelfClose,
             ],
         );
@@ -2215,8 +2357,9 @@ mod test {
                 tokens,
                 [
                     ElementOpenStart(Complete("a")),
-                    AttributeName(Complete("b")),
-                    AttributeValue(Complete("c")),
+                    AttributeStart(Complete("b")),
+                    AttributeValueLiteral(Complete("c")),
+                    AttributeValueEnd,
                     ElementSelfClose,
                 ],
             );
@@ -2241,8 +2384,9 @@ mod test {
                 tokens,
                 [
                     ElementOpenStart(Complete("a")),
-                    AttributeName(Complete("b")),
-                    AttributeValue(Complete("c")),
+                    AttributeStart(Complete("b")),
+                    AttributeValueLiteral(Complete("c")),
+                    AttributeValueEnd,
                     ElementSelfClose,
                 ],
             );
@@ -2313,6 +2457,30 @@ mod test {
         let error = Parser::new_from_str(r"<a\b='c'>").collect_owned();
 
         assert_error!(error, Error::RequiredSpaceMissing { location: 2 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_attribute_with_unescaped_less_than() -> Result {
+        let error = Parser::new_from_str("<a b='<'").collect_owned();
+
+        assert_error!(error, Error::InvalidCharacterInAttribute { location: 6 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_attribute_with_unescaped_ampersand() -> Result {
+        let error = Parser::new_from_str("<a b='&'").collect_owned();
+
+        assert_error!(
+            error,
+            Error::RequiredTokenMissing {
+                token: RequiredToken::Semicolon,
+                location: 7
+            }
+        );
 
         Ok(())
     }
@@ -2395,12 +2563,13 @@ mod test {
             let tokens = FuseCore::fuse_all(vec![
                 ElementOpenStart(Partial("aaaaa")),
                 ElementOpenStart(Complete("aaaaa")),
-                AttributeName(Partial("")),
-                AttributeName(Partial("bbbbbbbbbb")),
-                AttributeName(Complete("")),
-                AttributeValue(Partial("c")),
-                AttributeValue(Partial("c")),
-                AttributeValue(Complete("c")),
+                AttributeStart(Partial("")),
+                AttributeStart(Partial("bbbbbbbbbb")),
+                AttributeStart(Complete("")),
+                AttributeValueLiteral(Partial("c")),
+                AttributeValueLiteral(Partial("c")),
+                AttributeValueLiteral(Complete("c")),
+                AttributeValueEnd,
                 ElementSelfClose,
             ])?;
 
@@ -2408,8 +2577,9 @@ mod test {
                 tokens,
                 [
                     ElementOpenStart("aaaaaaaaaa"),
-                    AttributeName("bbbbbbbbbb"),
-                    AttributeValue("ccc"),
+                    AttributeStart("bbbbbbbbbb"),
+                    AttributeValueLiteral("ccc"),
+                    AttributeValueEnd,
                     ElementSelfClose,
                 ],
             );

@@ -10,8 +10,10 @@ pub struct Formatter<W> {
     inside_declaration_start: bool,
     inside_element_open_start: bool,
     inside_element_close: bool,
-    inside_attribute_name: bool,
-    inside_attribute_value: bool,
+    inside_attribute_start: bool,
+    inside_attribute_value_reference_named: bool,
+    inside_attribute_value_reference_decimal: bool,
+    inside_attribute_value_reference_hex: bool,
     inside_reference_named: bool,
     inside_reference_decimal: bool,
     inside_reference_hex: bool,
@@ -30,8 +32,10 @@ where
             inside_declaration_start: false,
             inside_element_open_start: false,
             inside_element_close: false,
-            inside_attribute_name: false,
-            inside_attribute_value: false,
+            inside_attribute_start: false,
+            inside_attribute_value_reference_named: false,
+            inside_attribute_value_reference_decimal: false,
+            inside_attribute_value_reference_hex: false,
             inside_reference_named: false,
             inside_reference_decimal: false,
             inside_reference_hex: false,
@@ -82,8 +86,18 @@ where
             ElementOpenEnd => write!(output, ">"),
             ElementSelfClose => write!(output, "/>"),
             ElementClose(v) => pre_post!(inside_element_close, ("</"), v, (">")),
-            AttributeName(v) => pre_post!(inside_attribute_name, (" "), v, ("=")),
-            AttributeValue(v) => pre_post!(inside_attribute_value, ("{}", quote), v, ("{}", quote)),
+            AttributeStart(v) => pre_post!(inside_attribute_start, (" "), v, ("={}", quote)),
+            AttributeValueLiteral(v) => write!(output, "{}", v),
+            AttributeValueReferenceNamed(v) => {
+                pre_post!(inside_attribute_value_reference_named, ("&"), v, (";"))
+            }
+            AttributeValueReferenceDecimal(v) => {
+                pre_post!(inside_attribute_value_reference_decimal, ("&#"), v, (";"))
+            }
+            AttributeValueReferenceHex(v) => {
+                pre_post!(inside_attribute_value_reference_hex, ("&#x"), v, (";"))
+            }
+            AttributeValueEnd => write!(output, "{}", quote),
             CharData(v) => write!(output, "{}", v),
             CData(v) => pre_post!(inside_reference_named, ("<![CDATA["), v, ("]]>")),
             Space(v) => write!(output, "{}", v),
@@ -151,43 +165,71 @@ mod test {
     }
 
     #[test]
-    fn attribute_name() -> Result {
+    fn attribute_start() -> Result {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeName(Partial("ab")))?;
-        f.write_token(AttributeName(Partial("cd")))?;
-        f.write_token(AttributeName(Complete("ef")))?;
+        f.write_token(AttributeStart(Partial("ab")))?;
+        f.write_token(AttributeStart(Partial("cd")))?;
+        f.write_token(AttributeStart(Complete("ef")))?;
 
-        assert_eq!(out, br#" abcdef="#);
+        assert_eq!(out, br#" abcdef=""#);
 
         Ok(())
     }
 
     #[test]
-    fn cdata() -> Result {
+    fn attribute_value_literal() -> Result {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(CData(Partial("ab")))?;
-        f.write_token(CData(Partial("cd")))?;
-        f.write_token(CData(Complete("ef")))?;
+        f.write_token(AttributeValueLiteral(Partial("ab")))?;
+        f.write_token(AttributeValueLiteral(Partial("cd")))?;
+        f.write_token(AttributeValueLiteral(Complete("ef")))?;
 
-        assert_eq!(out, br#"<![CDATA[abcdef]]>"#);
+        assert_eq!(out, br#"abcdef"#);
 
         Ok(())
     }
 
     #[test]
-    fn attribute_value() -> Result {
+    fn attribute_value_reference_named() -> Result {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeValue(Partial("ab")))?;
-        f.write_token(AttributeValue(Partial("cd")))?;
-        f.write_token(AttributeValue(Complete("ef")))?;
+        f.write_token(AttributeValueReferenceNamed(Partial("ab")))?;
+        f.write_token(AttributeValueReferenceNamed(Partial("cd")))?;
+        f.write_token(AttributeValueReferenceNamed(Complete("ef")))?;
 
-        assert_eq!(out, br#""abcdef""#);
+        assert_eq!(out, br#"&abcdef;"#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_value_reference_decimal() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token(AttributeValueReferenceDecimal(Partial("12")))?;
+        f.write_token(AttributeValueReferenceDecimal(Partial("34")))?;
+        f.write_token(AttributeValueReferenceDecimal(Complete("56")))?;
+
+        assert_eq!(out, br#"&#123456;"#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_value_reference_hex() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token(AttributeValueReferenceHex(Partial("AB")))?;
+        f.write_token(AttributeValueReferenceHex(Partial("CD")))?;
+        f.write_token(AttributeValueReferenceHex(Complete("EF")))?;
+
+        assert_eq!(out, br#"&#xABCDEF;"#);
 
         Ok(())
     }
@@ -230,6 +272,20 @@ mod test {
         f.write_token(ReferenceHex(Complete("EF")))?;
 
         assert_eq!(out, br#"&#xABCDEF;"#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cdata() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token(CData(Partial("ab")))?;
+        f.write_token(CData(Partial("cd")))?;
+        f.write_token(CData(Complete("ef")))?;
+
+        assert_eq!(out, br#"<![CDATA[abcdef]]>"#);
 
         Ok(())
     }

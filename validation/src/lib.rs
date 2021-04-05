@@ -84,7 +84,7 @@ impl ValidatorCore {
                 )
             }
 
-            AttributeName(v) => {
+            AttributeStart(v) => {
                 let v = v.as_ref();
 
                 ensure!(!v.is_empty(), AttributeNameEmpty);
@@ -332,7 +332,7 @@ mod test {
     fn fail_attribute_name_empty() {
         let e = ValidatorCore::validate_all(vec![
             ElementOpenStart("a"),
-            AttributeName(""),
+            AttributeStart(""),
             ElementSelfClose,
         ]);
 
@@ -387,10 +387,10 @@ mod test {
     fn fail_duplicated_attribute_name() {
         let e = ValidatorCore::validate_all(vec![
             ElementOpenStart("a"),
-            AttributeName("b"),
-            AttributeValue("c"),
-            AttributeName("b"),
-            AttributeValue("d"),
+            AttributeStart("b"),
+            AttributeValueLiteral("c"),
+            AttributeStart("b"),
+            AttributeValueLiteral("d"),
             ElementSelfClose,
         ]);
 

@@ -69,9 +69,13 @@ impl_token! {
         ElementClose(T),
 
         /// `foo`
-        AttributeName(T),
+        AttributeStart(T),
         /// `="bar`
-        AttributeValue(T),
+        AttributeValueLiteral(T),
+        AttributeValueReferenceNamed(T),
+        AttributeValueReferenceDecimal(T),
+        AttributeValueReferenceHex(T),
+        AttributeValueEnd,
 
         /// `hello world`
         CharData(T),
