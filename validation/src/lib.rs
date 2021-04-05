@@ -37,11 +37,13 @@ impl ValidatorCore {
             );
         }
 
-        *count += 1;
-
         match &token {
             // TODO: validate reference values are in-bounds
             DeclarationStart(v) => {
+                if *count != 0 {
+                    return DeclarationOnlyAllowedAtStart.fail();
+                }
+
                 static VALID_VERSION_STRING: Lazy<Regex> =
                     Lazy::new(|| Regex::new(r#"^1\.[0-9]+$"#).unwrap());
 
@@ -135,6 +137,8 @@ impl ValidatorCore {
             _ => {}
         };
 
+        *count += 1;
+
         Ok(token)
     }
 
@@ -193,6 +197,8 @@ where
 #[derive(Debug, Snafu)]
 pub enum Error {
     MustStartWithDeclarationOrElement,
+
+    DeclarationOnlyAllowedAtStart,
 
     InvalidDeclarationVersion {
         version: String,
@@ -260,6 +266,17 @@ mod test {
                 $e,
             )
         };
+    }
+
+    #[test]
+    fn fail_declaration_not_at_start() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementClose("a"),
+            DeclarationStart("1.0"),
+        ]);
+
+        assert_error!(&e, Error::DeclarationOnlyAllowedAtStart);
     }
 
     #[test]
