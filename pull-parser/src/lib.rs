@@ -678,7 +678,10 @@ impl CoreParser {
         self.buffer.advance(to_advance);
 
         if self.buffer.complete() {
-            return None;
+            return match self.finish() {
+                Ok(()) => None,
+                Err(e) => Some(Err(e)),
+            };
         }
 
         self.ratchet(self.state);
@@ -766,6 +769,11 @@ impl CoreParser {
         }
 
         token.transpose()
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        ensure!(self.state == State::Initial, IncompleteXml);
+        Ok(())
     }
 
     fn dispatch_initial(&mut self) -> Result<Option<Tok>> {
@@ -1350,6 +1358,9 @@ pub enum Error {
         location: usize,
     },
 
+    #[snafu(display("The input data did not end in a valid state"))]
+    IncompleteXml,
+
     #[snafu(display("The input data is not valid XML starting at byte {}", location))]
     InvalidXml {
         location: usize,
@@ -1408,7 +1419,12 @@ where
             let n_new_bytes = parser.refill_using(|buf| source.read(buf));
 
             match n_new_bytes {
-                Ok(Ok(0)) if *exhausted => return None,
+                Ok(Ok(0)) if *exhausted => {
+                    return match parser.finish() {
+                        Ok(()) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                }
                 Ok(Ok(0)) => {
                     *exhausted = true;
                     continue;
@@ -2036,16 +2052,6 @@ mod test {
     }
 
     #[test]
-    fn processing_instruction_unclosed() -> Result {
-        let tokens = Parser::new_from_str(r"<?a").collect_owned()?;
-
-        use {Streaming::*, Token::*};
-        assert_eq!(tokens, [ProcessingInstructionStart(Partial("a"))]);
-
-        Ok(())
-    }
-
-    #[test]
     fn comment() -> Result {
         let tokens = Parser::new_from_str("<!-- hello -->").collect_owned()?;
 
@@ -2068,16 +2074,6 @@ mod test {
                 Comment(Complete("aaaaaaaa")),
             ]
         );
-
-        Ok(())
-    }
-
-    #[test]
-    fn comment_unclosed() -> Result {
-        let tokens = Parser::new_from_str(r##"<!--hello"##).collect_owned()?;
-
-        use {Streaming::*, Token::*};
-        assert_eq!(tokens, [Comment(Partial("hello"))]);
 
         Ok(())
     }
@@ -2499,6 +2495,24 @@ mod test {
         let error = Parser::new_from_str("<!------>").collect_owned();
 
         assert_error!(error, Error::DoubleHyphenInComment { location: 4 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_comment_unclosed() -> Result {
+        let error = Parser::new_from_str(r##"<!--hello"##).collect_owned();
+
+        assert_error!(error, Error::IncompleteXml);
+
+        Ok(())
+    }
+
+    #[test]
+    fn fail_processing_instruction_unclosed() -> Result {
+        let error = Parser::new_from_str(r"<?a").collect_owned();
+
+        assert_error!(error, Error::IncompleteXml);
 
         Ok(())
     }
