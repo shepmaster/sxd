@@ -195,8 +195,10 @@ impl StringRing {
 
         if let Some(x) = s.strip_prefix("xml") {
             // index 0 is always available since min_str(4)
-            if x.as_bytes()[0].is_xml_space() {
-                self.advance(4);
+            let next = x.as_bytes()[0];
+
+            if next == b'?' || next.is_xml_space() {
+                self.advance(3);
                 Ok(MustUse(true))
             } else {
                 Ok(MustUse(false))
@@ -2289,6 +2291,21 @@ mod test {
 
             Ok(())
         }
+    }
+
+    #[test]
+    fn fail_declaration_missing_version() -> Result {
+        let error = Parser::new_from_str(r"<?xml?>").collect_owned();
+
+        assert_error!(
+            error,
+            Error::RequiredTokenMissing {
+                token: RequiredToken::Version,
+                location: 5
+            }
+        );
+
+        Ok(())
     }
 
     #[test]
