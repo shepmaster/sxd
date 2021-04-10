@@ -194,8 +194,10 @@ impl StringRing {
         let s = abandon!(self.weak_min_str(4));
 
         if let Some(x) = s.strip_prefix("xml") {
-            // index 0 is always available since min_str(4)
-            let next = x.as_bytes()[0];
+            let next = match x.as_bytes().split_first() {
+                Some((&h, _)) => h,
+                None => return Ok(MustUse(false)),
+            };
 
             if next == b'?' || next.is_xml_space() {
                 self.advance(3);
@@ -2431,6 +2433,15 @@ mod test {
 
             Ok(())
         }
+    }
+
+    #[test]
+    fn fail_declaration_unclosed() -> Result {
+        let error = Parser::new_from_str(r"<?xml").collect_owned();
+
+        assert_error!(error, Error::IncompleteXml);
+
+        Ok(())
     }
 
     #[test]
