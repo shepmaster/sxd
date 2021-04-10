@@ -142,6 +142,7 @@ impl ValidatorCore {
         let Self {
             arena,
             element_stack,
+            seen_one_element,
             ..
         } = self;
 
@@ -149,6 +150,8 @@ impl ValidatorCore {
             let name = &arena[opened];
             return ElementOpenedWithoutClose { name }.fail();
         }
+
+        ensure!(*seen_one_element, NoTopLevelElements);
 
         Ok(())
     }
@@ -224,6 +227,8 @@ pub enum Error {
         open: String,
         close: String,
     },
+
+    NoTopLevelElements,
 
     MultipleTopLevelElements {
         name: String,
@@ -340,6 +345,13 @@ mod test {
         let e = ValidatorCore::validate_all(vec![ElementOpenStart("a")]);
 
         assert_error!(&e, Error::ElementOpenedWithoutClose { name } if name == "a");
+    }
+
+    #[test]
+    fn fail_no_top_level_elements() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0")]);
+
+        assert_error!(&e, Error::NoTopLevelElements);
     }
 
     #[test]
