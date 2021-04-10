@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
-use pull_parser::{Fuse, Parser};
+use pull_parser::{Fuse, Parser, XmlCharExt};
 use regex::Regex;
-use snafu::{ensure, OptionExt, Snafu};
+use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{collections::HashSet, io::Read};
 use string_slab::{CheckedArena, CheckedKey};
 use token::Token;
@@ -38,7 +38,6 @@ impl ValidatorCore {
         }
 
         match &token {
-            // TODO: validate reference values are in-bounds
             DeclarationStart(v) => {
                 if *count != 0 {
                     return DeclarationOnlyAllowedAtStart.fail();
@@ -94,6 +93,16 @@ impl ValidatorCore {
                     AttributeDuplicate { name: v },
                 )
             }
+            AttributeValueReferenceDecimal(v) => {
+                let v = v.as_ref();
+                // TODO: Avoid performing this transformation at multiple layers
+                reference_value(v, 10).context(InvalidAttributeValueReferenceDecimal)?;
+            }
+            AttributeValueReferenceHex(v) => {
+                let v = v.as_ref();
+                // TODO: Avoid performing this transformation at multiple layers
+                reference_value(v, 16).context(InvalidAttributeValueReferenceHex)?;
+            }
 
             CharData(v) => {
                 let v = v.as_ref();
@@ -120,6 +129,8 @@ impl ValidatorCore {
                     !element_stack.is_empty(),
                     ReferenceDecimalOutsideOfElement { text: v }
                 );
+                // TODO: Avoid performing this transformation at multiple layers
+                reference_value(v, 10).context(InvalidReferenceDecimal)?;
             }
             ReferenceHex(v) => {
                 let v = v.as_ref();
@@ -127,6 +138,8 @@ impl ValidatorCore {
                     !element_stack.is_empty(),
                     ReferenceHexOutsideOfElement { text: v }
                 );
+                // TODO: Avoid performing this transformation at multiple layers
+                reference_value(v, 16).context(InvalidReferenceHex)?;
             }
 
             ProcessingInstructionStart(v) => {
@@ -159,6 +172,30 @@ impl ValidatorCore {
 
         Ok(())
     }
+}
+
+fn reference_value(value: &str, radix: u32) -> Result<char, ReferenceValueError> {
+    let value = u32::from_str_radix(value, radix).context(InvalidValue { value })?;
+    let value = char::from_u32(value).context(InvalidUnicodeCharacter { value })?;
+    ensure!(
+        value.is_allowed_xml_char(),
+        DisallowedUnicodeCharacter { value }
+    );
+    Ok(value)
+}
+
+#[derive(Debug, Snafu)]
+pub enum ReferenceValueError {
+    InvalidValue {
+        source: std::num::ParseIntError,
+        value: String,
+    },
+    InvalidUnicodeCharacter {
+        value: u32,
+    },
+    DisallowedUnicodeCharacter {
+        value: char,
+    },
 }
 
 #[derive(Debug)]
@@ -218,6 +255,19 @@ pub enum Error {
     },
     ReferenceHexOutsideOfElement {
         text: String,
+    },
+
+    InvalidAttributeValueReferenceDecimal {
+        source: ReferenceValueError,
+    },
+    InvalidAttributeValueReferenceHex {
+        source: ReferenceValueError,
+    },
+    InvalidReferenceDecimal {
+        source: ReferenceValueError,
+    },
+    InvalidReferenceHex {
+        source: ReferenceValueError,
     },
 
     ElementNameEmpty,
@@ -322,6 +372,30 @@ mod test {
     }
 
     #[test]
+    fn fail_reference_decimal_invalid() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementOpenEnd,
+            ReferenceDecimal("1"),
+            ElementClose("a"),
+        ]);
+
+        assert_error!(&e, Error::InvalidReferenceDecimal { .. });
+    }
+
+    #[test]
+    fn fail_reference_hex_invalid() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementOpenEnd,
+            ReferenceHex("1"),
+            ElementClose("a"),
+        ]);
+
+        assert_error!(&e, Error::InvalidReferenceHex { .. });
+    }
+
+    #[test]
     fn fail_element_name_empty() {
         let e = ValidatorCore::validate_all(vec![ElementOpenStart("")]);
 
@@ -337,6 +411,30 @@ mod test {
         ]);
 
         assert_error!(&e, Error::AttributeNameEmpty);
+    }
+
+    #[test]
+    fn fail_attribute_value_reference_decimal_invalid() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("b"),
+            AttributeValueReferenceDecimal("1"),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::InvalidAttributeValueReferenceDecimal { .. });
+    }
+
+    #[test]
+    fn fail_attribute_value_reference_hex_invalid() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("b"),
+            AttributeValueReferenceHex("1"),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::InvalidAttributeValueReferenceHex { .. });
     }
 
     #[test]
@@ -402,6 +500,32 @@ mod test {
         let e = ValidatorCore::validate_all(vec![ReferenceNamed("lt")]);
 
         assert_error!(&e, Error::MustStartWithDeclarationOrElement);
+    }
+
+    mod reference_value {
+        use super::*;
+        use crate::ReferenceValueError;
+
+        #[test]
+        fn fail_invalid_u32() {
+            let e = reference_value("9999999999", 10);
+
+            assert_error!(&e, ReferenceValueError::InvalidValue { value, .. } if value == "9999999999");
+        }
+
+        #[test]
+        fn fail_invalid_char() {
+            let e = reference_value("FFFFFFFF", 16);
+
+            assert_error!(&e, ReferenceValueError::InvalidUnicodeCharacter { value } if *value == 0xFFFF_FFFF);
+        }
+
+        #[test]
+        fn fail_disallowed_char() {
+            let e = reference_value("1", 10);
+
+            assert_error!(&e, ReferenceValueError::DisallowedUnicodeCharacter { value } if *value == '\u{1}');
+        }
     }
 
     impl ValidatorCore {
