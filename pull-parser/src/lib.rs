@@ -455,13 +455,11 @@ impl u8 {
 impl char {
     #[inline]
     fn is_allowed_xml_char(self) -> bool {
+        // Sorted by how common each case is, using early exits
         match self {
-            '\u{9}'
-            | '\u{A}'
-            | '\u{D}'
-            | '\u{20}'..='\u{D7FF}'
-            | '\u{E000}'..='\u{FFFD}'
-            | '\u{10000}'..='\u{10FFFF}' => true,
+            '\u{20}'..='\u{FF}' => true,
+            '\u{9}' | '\u{A}' | '\u{D}' => true,
+            '\u{100}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}' => true,
             _ => false,
         }
     }
