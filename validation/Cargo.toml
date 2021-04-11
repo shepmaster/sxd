@@ -12,3 +12,10 @@ token = { package = "sxd-token", path = "../token" }
 string-slab = { package = "sxd-string-slab", path = "../string-slab" }
 
 snafu = "0.6.10"
+
+[dev-dependencies]
+iai = "0.1.1"
+
+[[bench]]
+name = "benchmark_iai"
+harness = false
