@@ -473,7 +473,7 @@ mod test {
                 return v;
             }
 
-            let n_dupes = rng.gen_range(0, v.len());
+            let n_dupes = rng.gen_range(0..v.len());
             let dupes: Vec<_> = v.choose_multiple(&mut rng, n_dupes).cloned().collect();
             v.extend(dupes);
             v.shuffle(&mut rng);
