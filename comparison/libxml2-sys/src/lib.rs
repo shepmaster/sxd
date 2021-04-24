@@ -38,6 +38,10 @@ struct Document(*mut ffi::_xmlDoc);
 
 impl Document {
     fn parse(s: &str) -> Result<Document> {
+        if s.contains('\0') {
+            return Err(Error("libxml2 stops processing at embedded NULs; treating this as a failure".into()));
+        }
+
         unsafe {
             let buf = s.as_ptr() as *const c_char;
             let buf_len = s.len().try_into().expect("Can't fit size");
