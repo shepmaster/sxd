@@ -32,8 +32,11 @@ impl ValidatorCore {
 
         if *count == 0 {
             ensure!(
-                matches!(token, DeclarationStart(_) | ElementOpenStart(_)),
-                MustStartWithDeclarationOrElement,
+                matches!(
+                    token,
+                    DeclarationStart(_) | ElementOpenStart(_) | ProcessingInstructionStart(_)
+                ),
+                InvalidStartItem,
             );
         }
 
@@ -233,7 +236,8 @@ where
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    MustStartWithDeclarationOrElement,
+    #[snafu(display("An XML document cannot start with this item"))]
+    InvalidStartItem,
 
     DeclarationOnlyAllowedAtStart,
 
@@ -306,7 +310,12 @@ mod test {
     use super::*;
     use token::Token::*;
 
-    #[macro_export]
+    macro_rules! assert_ok {
+        ($e:expr) => {
+            assert!(matches!($e, Ok(_)), "Expected Ok(_), but got {:?}", $e,)
+        };
+    }
+
     macro_rules! assert_error {
         ($e:expr, $p:pat $(if $guard:expr)?) => {
             assert!(
@@ -496,10 +505,21 @@ mod test {
     }
 
     #[test]
-    fn fail_does_not_start_with_declaration_or_element() {
+    fn may_start_with_processing_instruction() {
+        let e = ValidatorCore::validate_all(vec![
+            ProcessingInstructionStart("zml"),
+            ElementOpenStart("element"),
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
+    }
+
+    #[test]
+    fn fail_does_not_start_with_declaration_element_or_processing_instruction() {
         let e = ValidatorCore::validate_all(vec![ReferenceNamed("lt")]);
 
-        assert_error!(&e, Error::MustStartWithDeclarationOrElement);
+        assert_error!(&e, Error::InvalidStartItem);
     }
 
     mod reference_value {
