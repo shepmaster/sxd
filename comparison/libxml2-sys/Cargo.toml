@@ -8,4 +8,4 @@ edition = "2018"
 
 [build-dependencies]
 pkg-config = "0.3.19"
-bindgen = "0.56.0"
+bindgen = "0.58.0"
