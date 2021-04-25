@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use pull_parser::{Fuse, Parser, XmlCharExt};
+use pull_parser::{Fuse, Parser, XmlCharExt, XmlStrExt};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{collections::HashSet, io::Read};
@@ -34,7 +34,10 @@ impl ValidatorCore {
             ensure!(
                 matches!(
                     token,
-                    DeclarationStart(_) | ElementOpenStart(_) | ProcessingInstructionStart(_)
+                    DeclarationStart(_)
+                        | ElementOpenStart(_)
+                        | ProcessingInstructionStart(_)
+                        | CharData(_)
                 ),
                 InvalidStartItem,
             );
@@ -110,7 +113,7 @@ impl ValidatorCore {
             CharData(v) => {
                 let v = v.as_ref();
                 ensure!(
-                    !element_stack.is_empty(),
+                    !element_stack.is_empty() || v.is_xml_space(),
                     CharDataOutsideOfElement { text: v }
                 );
             }
@@ -346,8 +349,8 @@ mod test {
     }
 
     #[test]
-    fn fail_char_data_outside_element() {
-        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), CharData("a")]);
+    fn fail_char_data_outside_element_if_not_whitespace() {
+        let e = ValidatorCore::validate_all(vec![CharData("a")]);
 
         assert_error!(&e, Error::CharDataOutsideOfElement { text } if text == "a");
     }
@@ -502,6 +505,17 @@ mod test {
         ]);
 
         assert_error!(&e, Error::AttributeDuplicate { name } if name == "b");
+    }
+
+    #[test]
+    fn may_start_with_whitespace() {
+        let e = ValidatorCore::validate_all(vec![
+            CharData(" \r\n\t"),
+            ElementOpenStart("element"),
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
     }
 
     #[test]

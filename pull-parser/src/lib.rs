@@ -522,6 +522,13 @@ impl char {
     }
 }
 
+#[ext(pub XmlStrExt)]
+impl str {
+    fn is_xml_space(&self) -> bool {
+        self.as_bytes().iter().all(u8::is_xml_space)
+    }
+}
+
 // There are a number of `*Space` states. Larger concepts may contain
 // optional whitespace which may fill out the rest of the buffer. We
 // need to be able to exit our loop, allow the user to refill the
