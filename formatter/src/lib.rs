@@ -100,7 +100,6 @@ where
             AttributeValueEnd => write!(output, "{}", quote),
             CharData(v) => write!(output, "{}", v),
             CData(v) => pre_post!(inside_reference_named, ("<![CDATA["), v, ("]]>")),
-            Space(v) => write!(output, "{}", v),
             ReferenceNamed(v) => pre_post!(inside_reference_named, ("&"), v, (";")),
             ReferenceDecimal(v) => pre_post!(inside_reference_decimal, ("&#"), v, (";")),
             ReferenceHex(v) => pre_post!(inside_reference_hex, ("&#x"), v, (";")),

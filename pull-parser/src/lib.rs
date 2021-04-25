@@ -341,16 +341,6 @@ impl StringRing {
         }
     }
 
-    fn space(&mut self) -> Result<Option<usize>> {
-        let s = abandon!(self.some_str());
-
-        match s.as_bytes().iter().position(|c| !c.is_xml_space()) {
-            Some(0) => Ok(None),
-            Some(n) => Ok(Some(n)),
-            None => Ok(Some(s.len())), // all chars are whitespace
-        }
-    }
-
     // Note that space amounts can be unbounded, which means that any
     // use of this should likely occur at the beginning of a state
     // dispatch.
@@ -774,7 +764,10 @@ impl CoreParser {
     }
 
     fn finish(&mut self) -> Result<()> {
-        ensure!(self.state == State::Initial, IncompleteXml);
+        ensure!(
+            matches!(self.state, State::Initial | State::StreamCharData),
+            IncompleteXml
+        );
         Ok(())
     }
 
@@ -812,10 +805,7 @@ impl CoreParser {
             return self.dispatch_stream_element_open_name(StringRing::name);
         }
 
-        if let Some(l) = self.buffer.space()? {
-            self.to_advance = l;
-            Ok(Some(Space(Streaming::Complete(l))))
-        } else if let Some(v) = self.buffer.first_char_data()? {
+        if let Some(v) = self.buffer.first_char_data()? {
             self.to_advance = *v.unify();
 
             if !v.is_complete() {
@@ -1512,7 +1502,6 @@ impl FuseCore {
 
             CharData(val),
             CData(val),
-            Space(val),
 
             ReferenceNamed(val),
             ReferenceDecimal(val),
@@ -1528,6 +1517,7 @@ impl FuseCore {
 
     fn finish(&mut self) -> Result<(), FuseError> {
         match self.current.take() {
+            Some(Token::CharData(_)) => Ok(()),
             Some(_) => Incomplete.fail(),
             None => Ok(()),
         }
@@ -1923,7 +1913,7 @@ mod test {
         let tokens = Parser::new_from_str(" \t\r\n").collect_owned()?;
 
         use {Streaming::*, Token::*};
-        assert_eq!(tokens, [Space(Complete(" \t\r\n"))]);
+        assert_eq!(tokens, [CharData(Partial(" \t\r\n"))]);
 
         Ok(())
     }
@@ -1936,10 +1926,10 @@ mod test {
         assert_eq!(
             tokens,
             [
-                Space(Complete("\t ")),
+                CharData(Complete("\t ")),
                 ElementOpenStart(Complete("a")),
                 ElementSelfClose,
-                Space(Complete("\r\n")),
+                CharData(Partial("\r\n")),
             ],
         );
 
@@ -1954,11 +1944,11 @@ mod test {
         assert_eq!(
             tokens,
             [
-                Space(Complete("\t ")),
+                CharData(Complete("\t ")),
                 ElementOpenStart(Complete("a")),
                 ElementOpenEnd,
                 ElementClose(Complete("a")),
-                Space(Complete("\r\n")),
+                CharData(Partial("\r\n")),
             ],
         );
 
@@ -2191,7 +2181,7 @@ mod test {
         let tokens = Parser::new_from_str_and_min_capacity(input).collect_owned()?;
 
         use {Streaming::*, Token::*};
-        assert_eq!(tokens, [Space(Complete(" "))]);
+        assert_eq!(tokens, [CharData(Partial(" "))]);
 
         Ok(())
     }

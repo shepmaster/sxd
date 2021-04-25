@@ -81,7 +81,6 @@ impl_token! {
         CharData(T),
         /// `<![CDATA[hello world]]>`
         CData(T),
-        Space(T),
 
         /// &lt;
         ReferenceNamed(T),
