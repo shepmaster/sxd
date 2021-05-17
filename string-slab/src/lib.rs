@@ -293,7 +293,7 @@ impl UnsafeArena {
     /// Nothing enforces that this key came from this arena. If it did not, then this will cause
     /// undefined behavior. This method allows the *caller* to decide what the lifetime should be,
     /// and should be used with great caution.
-    unsafe fn as_unbound_str<'a>(&self, key: UnsafeKey) -> &'a str {
+    pub unsafe fn as_unbound_str<'a>(&self, key: UnsafeKey) -> &'a str {
         key.0.as_unbound_str()
     }
 }
