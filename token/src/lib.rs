@@ -51,6 +51,16 @@ pub enum Streaming<T> {
 
 impl<T> Streaming<T> {
     #[inline]
+    pub fn into_complete(self) -> Option<T> {
+        use Streaming::*;
+
+        match self {
+            Partial(_) => None,
+            Complete(v) => Some(v),
+        }
+    }
+
+    #[inline]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Streaming<U> {
         use Streaming::*;
 

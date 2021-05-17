@@ -16,6 +16,7 @@ lto = "thin"
 
 [workspace]
 members = [
+    "document",
     "pull-parser",
     "string-slab",
     "string-slab/benchmarks",
@@ -25,9 +26,10 @@ members = [
 ]
 
 [dependencies]
-token = { package = "sxd-token", path = "token" }
-pull-parser = { package = "sxd-pull-parser", path = "pull-parser" }
+document = { package = "sxd-document", path = "document" }
 formatter = { package = "sxd-formatter", path = "formatter" }
+pull-parser = { package = "sxd-pull-parser", path = "pull-parser" }
+token = { package = "sxd-token", path = "token" }
 validation = { package = "sxd-validation", path = "validation" }
 
 argh = { version = "0.1.7", default-features = false }
