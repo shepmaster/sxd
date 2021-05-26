@@ -151,6 +151,10 @@ impl ValidatorCore {
             ProcessingInstructionStart(v) => {
                 let v = v.as_ref();
                 ensure!(!v.is_empty(), ProcessingInstructionNameEmpty);
+                ensure!(
+                    !v.eq_ignore_ascii_case("xml"),
+                    ProcessingInstructionInvalidName { name: v }
+                );
             }
 
             _ => {}
@@ -298,6 +302,10 @@ pub enum Error {
     },
 
     AttributeDuplicate {
+        name: String,
+    },
+
+    ProcessingInstructionInvalidName {
         name: String,
     },
 
@@ -505,6 +513,13 @@ mod test {
         ]);
 
         assert_error!(&e, Error::AttributeDuplicate { name } if name == "b");
+    }
+
+    #[test]
+    fn fail_not_quite_xml_processing_instruction() {
+        let e = ValidatorCore::validate_all(vec![ProcessingInstructionStart("xMl")]);
+
+        assert_error!(&e, Error::ProcessingInstructionInvalidName { name } if name == "xMl");
     }
 
     #[test]
