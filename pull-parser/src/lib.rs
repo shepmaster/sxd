@@ -1522,11 +1522,11 @@ impl FuseCore {
         }
     }
 
-    fn finish(&mut self) -> Result<(), FuseError> {
+    fn finish(&mut self) -> Result<Option<Token<String>>, FuseError> {
         match self.current.take() {
-            Some(Token::CharData(_)) => Ok(()),
+            Some(t @ Token::CharData(_)) => Ok(Some(t)),
             Some(_) => Incomplete.fail(),
-            None => Ok(()),
+            None => Ok(None),
         }
     }
 }
@@ -1562,7 +1562,7 @@ where
         }
 
         match core.finish() {
-            Ok(()) => None,
+            Ok(v) => v.map(Ok),
             Err(e) => return Some(Err(e)),
         }
     }
@@ -2610,6 +2610,15 @@ mod test {
         }
 
         #[test]
+        fn unfinished_character_data_is_returned() -> Result {
+            let tokens = FuseCore::fuse_all(vec![CharData(Partial("a"))])?;
+
+            assert_eq!(tokens, [CharData("a"),],);
+
+            Ok(())
+        }
+
+        #[test]
         fn fail_unfinished_tokens() -> Result {
             let error = FuseCore::fuse_all(vec![ElementOpenStart(Partial("a"))]);
 
@@ -2665,7 +2674,9 @@ mod test {
                 collected.extend(me.push(token));
             }
 
-            me.finish().map(|()| collected)
+            collected.extend(me.finish()?);
+
+            Ok(collected)
         }
     }
 }
