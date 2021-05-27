@@ -1581,6 +1581,7 @@ pub enum FuseError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use {Streaming::*, Token::*};
 
     type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -1599,7 +1600,6 @@ mod test {
     fn xml_declaration() -> Result {
         let tokens = Parser::new_from_str(r#"<?xml version="1.0"?>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [DeclarationStart(Complete("1.0")), DeclarationClose],
@@ -1613,7 +1613,6 @@ mod test {
         let tokens = Parser::new_from_str_and_min_capacity(r#"<?xml version="1.123456789"?>"#)
             .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1630,7 +1629,6 @@ mod test {
     fn xml_declaration_single_quoted() -> Result {
         let tokens = Parser::new_from_str(r#"<?xml version='1.0'?>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [DeclarationStart(Complete("1.0")), DeclarationClose],
@@ -1643,7 +1641,6 @@ mod test {
     fn self_closed_element() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [ElementOpenStart(Complete("alpha")), ElementSelfClose]
@@ -1657,7 +1654,6 @@ mod test {
         let tokens = Parser::new_from_str_and_min_capacity(r#"<a01234567890123456789 />"#)
             .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1674,7 +1670,6 @@ mod test {
     fn self_closed_element_with_one_attribute() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha a="b"/>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1696,7 +1691,6 @@ mod test {
         )
         .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1718,7 +1712,6 @@ mod test {
     fn attributes_with_both_quote_styles() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha a="b" c='d'/>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1740,7 +1733,6 @@ mod test {
     fn attribute_with_escaped_less_than_and_ampersand() -> Result {
         let tokens = Parser::new_from_str("<a b='&lt;&amp;' />").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1760,7 +1752,6 @@ mod test {
     fn attribute_with_references() -> Result {
         let tokens = Parser::new_from_str("<a b='&ten;&#10;&#x10;' />").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1781,7 +1772,6 @@ mod test {
     fn element_with_no_children() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha></alpha>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1801,7 +1791,6 @@ mod test {
         )
         .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1820,7 +1809,6 @@ mod test {
     fn element_with_one_child() -> Result {
         let tokens = Parser::new_from_str(r#"<alpha><beta /></alpha>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1839,7 +1827,6 @@ mod test {
     fn char_data() -> Result {
         let tokens = Parser::new_from_str("<a>b</a>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1858,7 +1845,6 @@ mod test {
         let tokens = Parser::new_from_str_and_min_capacity(r#"<a>01234567890123456789</a>"#)
             .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1877,7 +1863,6 @@ mod test {
     fn char_data_with_close_square_bracket() -> Result {
         let tokens = Parser::new_from_str("<a>b]</a>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1895,7 +1880,6 @@ mod test {
     fn cdata() -> Result {
         let tokens = Parser::new_from_str("<![CDATA[ hello ]]>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [CData(Complete(" hello "))]);
 
         Ok(())
@@ -1906,7 +1890,6 @@ mod test {
         let tokens = Parser::new_from_str_and_min_capacity("<![CDATA[aaaaaaaaaaaaaaaaaaaa]]>")
             .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [CData(Partial("aaaaaaa")), CData(Complete("aaaaaaaaaaaaa"))]
@@ -1919,7 +1902,6 @@ mod test {
     fn only_space() -> Result {
         let tokens = Parser::new_from_str(" \t\r\n").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [CharData(Partial(" \t\r\n"))]);
 
         Ok(())
@@ -1929,7 +1911,6 @@ mod test {
     fn leading_and_trailing_whitespace_self_closed() -> Result {
         let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1947,7 +1928,6 @@ mod test {
     fn leading_and_trailing_whitespace() -> Result {
         let tokens = Parser::new_from_str("\t <a></a>\r\n").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1966,7 +1946,6 @@ mod test {
     fn processing_instruction() -> Result {
         let tokens = Parser::new_from_str("<?a?>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -1983,7 +1962,6 @@ mod test {
         let tokens =
             Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa?>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2000,7 +1978,6 @@ mod test {
     fn processing_instruction_starts_with_xml() -> Result {
         let tokens = Parser::new_from_str("<?xml-but-not-that?>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2016,7 +1993,6 @@ mod test {
     fn processing_instruction_with_value() -> Result {
         let tokens = Parser::new_from_str("<?a b?>").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2035,7 +2011,6 @@ mod test {
             Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb?>")
                 .collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2054,7 +2029,6 @@ mod test {
     fn comment() -> Result {
         let tokens = Parser::new_from_str("<!-- hello -->").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [Comment(Complete(" hello "))]);
 
         Ok(())
@@ -2065,7 +2039,6 @@ mod test {
         let tokens =
             Parser::new_from_str_and_min_capacity("<!--aaaaaaaaaaaaaaaaaaaa-->").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2081,7 +2054,6 @@ mod test {
     fn reference_named() -> Result {
         let tokens = Parser::new_from_str("&lt;").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [ReferenceNamed(Complete("lt"))]);
 
         Ok(())
@@ -2092,7 +2064,6 @@ mod test {
         let tokens =
             Parser::new_from_str_and_min_capacity("&aaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2108,7 +2079,6 @@ mod test {
     fn reference_decimal() -> Result {
         let tokens = Parser::new_from_str("&#42;").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [ReferenceDecimal(Complete("42"))]);
 
         Ok(())
@@ -2119,7 +2089,6 @@ mod test {
         let tokens =
             Parser::new_from_str_and_min_capacity("&#11111111111111111111;").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2135,7 +2104,6 @@ mod test {
     fn reference_hex() -> Result {
         let tokens = Parser::new_from_str("&#xBEEF;").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [ReferenceHex(Complete("BEEF"))]);
 
         Ok(())
@@ -2146,7 +2114,6 @@ mod test {
         let tokens =
             Parser::new_from_str_and_min_capacity("&#xaaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2166,7 +2133,6 @@ mod test {
         let tokens =
             Parser::new_from_str_and_min_capacity(r#"<a----------------/>"#).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2187,7 +2153,6 @@ mod test {
 
         let tokens = Parser::new_from_str_and_min_capacity(input).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(tokens, [CharData(Partial(" "))]);
 
         Ok(())
@@ -2201,7 +2166,6 @@ mod test {
 
         let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2221,7 +2185,6 @@ mod test {
         //                         The last byte is ^
         let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2239,7 +2202,6 @@ mod test {
         //      this is the last byte in the buffer ^
         let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [
@@ -2257,7 +2219,6 @@ mod test {
         //      this is the last byte in the buffer ^
         let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-        use {Streaming::*, Token::*};
         assert_eq!(
             tokens,
             [CData(Partial("aaaaaaaaaaaaaaaaaaaaa")), CData(Complete(""))],
@@ -2286,7 +2247,6 @@ mod test {
 
             let tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [DeclarationStart(Complete("1.0")), DeclarationClose],
@@ -2308,7 +2268,6 @@ mod test {
 
             let tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [DeclarationStart(Complete("1.0")), DeclarationClose],
@@ -2329,7 +2288,6 @@ mod test {
             //           0               1               2               3
             let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(tokens, [ElementOpenStart(Complete("a")), ElementOpenEnd]);
 
             Ok(())
@@ -2347,7 +2305,6 @@ mod test {
             //           0               1               2               3
             let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
@@ -2374,7 +2331,6 @@ mod test {
             //           0               1               2               3
             let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
@@ -2401,7 +2357,6 @@ mod test {
             //           0               1               2               3
             let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(tokens, [ElementClose(Complete("a"))]);
 
             Ok(())
@@ -2419,7 +2374,6 @@ mod test {
             //           0               1               2               3
             let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
 
-            use {Streaming::*, Token::*};
             assert_eq!(
                 tokens,
                 [
@@ -2578,7 +2532,6 @@ mod test {
 
     mod fuse {
         use super::*;
-        use {Streaming::*, Token::*};
 
         #[test]
         fn combines_split_tokens() -> Result {
