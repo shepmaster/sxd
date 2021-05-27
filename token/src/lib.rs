@@ -55,6 +55,8 @@ impl_token! {
     pub enum Token<T> {
         /// `<?xml version="1.9"`
         DeclarationStart(T),
+        /// encoding="foo"
+        DeclarationEncoding(T),
         /// `?>`
         DeclarationClose,
 

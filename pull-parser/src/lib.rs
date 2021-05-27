@@ -543,6 +543,9 @@ enum State {
     StreamDeclarationVersion(Quote),
     AfterDeclarationVersion,
     AfterDeclarationVersionSpace,
+    StreamDeclarationEncoding(Quote),
+    AfterDeclarationEncoding,
+    AfterDeclarationEncodingSpace,
 
     StreamElementOpenName,
     AfterElementOpenName,
@@ -693,6 +696,9 @@ impl CoreParser {
             StreamDeclarationVersion(quote) => self.dispatch_stream_declaration_version(quote),
             AfterDeclarationVersion => self.dispatch_after_declaration_version(),
             AfterDeclarationVersionSpace => self.dispatch_after_declaration_version_space(),
+            StreamDeclarationEncoding(quote) => self.dispatch_stream_declaration_encoding(quote),
+            AfterDeclarationEncoding => self.dispatch_after_declaration_encoding(),
+            AfterDeclarationEncodingSpace => self.dispatch_after_declaration_encoding_space(),
 
             StreamElementOpenName => {
                 self.dispatch_stream_element_open_name(StringRing::name_continuation)
@@ -876,6 +882,46 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_version_space(&mut self) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        // TODO: this should require that we've seen a space in order to be allowed
+        if *self.buffer.consume("encoding")? {
+            self.buffer.require("=")?;
+            let quote = self.buffer.require_quote()?;
+
+            self.ratchet(StreamDeclarationEncoding(quote));
+            self.dispatch_stream_declaration_encoding(quote)
+        } else {
+            self.buffer.require("?>")?;
+
+            self.ratchet(Initial);
+            Ok(Some(DeclarationClose))
+        }
+    }
+
+    fn dispatch_stream_declaration_encoding(&mut self, quote: Quote) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        let value = self.buffer.attribute_value(quote)?;
+
+        self.to_advance = *value.unify();
+
+        if value.is_complete() {
+            self.ratchet(AfterDeclarationEncoding);
+            self.to_advance += quote.as_ref().len(); // Include the closing quote
+        }
+
+        Ok(Some(DeclarationEncoding(value)))
+    }
+
+    fn dispatch_after_declaration_encoding(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterDeclarationEncodingSpace,
+            Self::dispatch_after_declaration_encoding_space,
+        )
+    }
+
+    fn dispatch_after_declaration_encoding_space(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         self.buffer.require("?>")?;
@@ -1493,6 +1539,7 @@ impl FuseCore {
 
         fuse_tokens! {
             DeclarationStart(val),
+            DeclarationEncoding(val),
             DeclarationClose,
 
             ElementOpenStart(val),
@@ -1632,6 +1679,23 @@ mod test {
         assert_eq!(
             tokens,
             [DeclarationStart(Complete("1.0")), DeclarationClose],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn xml_declaration_encoding() -> Result {
+        let tokens =
+            Parser::new_from_str(r#"<?xml version="1.0" encoding="encoding"?>"#).collect_owned()?;
+
+        assert_eq!(
+            tokens,
+            [
+                DeclarationStart(Complete("1.0")),
+                DeclarationEncoding(Complete("encoding")),
+                DeclarationClose,
+            ],
         );
 
         Ok(())

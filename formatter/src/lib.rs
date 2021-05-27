@@ -8,6 +8,7 @@ pub struct Formatter<W> {
 
     // Use bitflags instead?
     inside_declaration_start: bool,
+    inside_declaration_encoding: bool,
     inside_element_open_start: bool,
     inside_element_close: bool,
     inside_attribute_start: bool,
@@ -30,6 +31,7 @@ where
             output,
             quote: r#"""#,
             inside_declaration_start: false,
+            inside_declaration_encoding: false,
             inside_element_open_start: false,
             inside_element_close: false,
             inside_attribute_start: false,
@@ -78,6 +80,12 @@ where
             DeclarationStart(v) => pre_post!(
                 inside_declaration_start,
                 ("<?xml version={}", quote),
+                v,
+                ("{}", quote)
+            ),
+            DeclarationEncoding(v) => pre_post!(
+                inside_declaration_encoding,
+                (" encoding={}", quote),
                 v,
                 ("{}", quote)
             ),
@@ -131,6 +139,20 @@ mod test {
         f.write_token(DeclarationStart(Complete("45")))?;
 
         assert_eq!(out, br#"<?xml version="1.2345""#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn declaration_encoding() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token(DeclarationEncoding(Partial("U")))?;
+        f.write_token(DeclarationEncoding(Partial("TF-")))?;
+        f.write_token(DeclarationEncoding(Complete("8")))?;
+
+        assert_eq!(out, br#" encoding="UTF-8""#);
 
         Ok(())
     }
