@@ -9,6 +9,7 @@ pub struct Formatter<W> {
     // Use bitflags instead?
     inside_declaration_start: bool,
     inside_declaration_encoding: bool,
+    inside_declaration_standalone: bool,
     inside_element_open_start: bool,
     inside_element_close: bool,
     inside_attribute_start: bool,
@@ -32,6 +33,7 @@ where
             quote: r#"""#,
             inside_declaration_start: false,
             inside_declaration_encoding: false,
+            inside_declaration_standalone: false,
             inside_element_open_start: false,
             inside_element_close: false,
             inside_attribute_start: false,
@@ -86,6 +88,12 @@ where
             DeclarationEncoding(v) => pre_post!(
                 inside_declaration_encoding,
                 (" encoding={}", quote),
+                v,
+                ("{}", quote)
+            ),
+            DeclarationStandalone(v) => pre_post!(
+                inside_declaration_standalone,
+                (" standalone={}", quote),
                 v,
                 ("{}", quote)
             ),
@@ -153,6 +161,20 @@ mod test {
         f.write_token(DeclarationEncoding(Complete("8")))?;
 
         assert_eq!(out, br#" encoding="UTF-8""#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn declaration_standalone() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token(DeclarationStandalone(Partial("y")))?;
+        f.write_token(DeclarationStandalone(Partial("e")))?;
+        f.write_token(DeclarationStandalone(Complete("s")))?;
+
+        assert_eq!(out, br#" standalone="yes""#);
 
         Ok(())
     }

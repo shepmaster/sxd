@@ -546,6 +546,9 @@ enum State {
     StreamDeclarationEncoding(Quote),
     AfterDeclarationEncoding,
     AfterDeclarationEncodingSpace,
+    StreamDeclarationStandalone(Quote),
+    AfterDeclarationStandalone,
+    AfterDeclarationStandaloneSpace,
 
     StreamElementOpenName,
     AfterElementOpenName,
@@ -699,6 +702,11 @@ impl CoreParser {
             StreamDeclarationEncoding(quote) => self.dispatch_stream_declaration_encoding(quote),
             AfterDeclarationEncoding => self.dispatch_after_declaration_encoding(),
             AfterDeclarationEncodingSpace => self.dispatch_after_declaration_encoding_space(),
+            StreamDeclarationStandalone(quote) => {
+                self.dispatch_stream_declaration_standalone(quote)
+            }
+            AfterDeclarationStandalone => self.dispatch_after_declaration_standalone(),
+            AfterDeclarationStandaloneSpace => self.dispatch_after_declaration_standalone_space(),
 
             StreamElementOpenName => {
                 self.dispatch_stream_element_open_name(StringRing::name_continuation)
@@ -891,6 +899,12 @@ impl CoreParser {
 
             self.ratchet(StreamDeclarationEncoding(quote));
             self.dispatch_stream_declaration_encoding(quote)
+        } else if *self.buffer.consume("standalone")? {
+            self.buffer.require("=")?;
+            let quote = self.buffer.require_quote()?;
+
+            self.ratchet(StreamDeclarationStandalone(quote));
+            self.dispatch_stream_declaration_standalone(quote)
         } else {
             self.buffer.require("?>")?;
 
@@ -922,6 +936,45 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_encoding_space(&mut self) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        if *self.buffer.consume("standalone")? {
+            self.buffer.require("=")?;
+            let quote = self.buffer.require_quote()?;
+
+            self.ratchet(StreamDeclarationStandalone(quote));
+            self.dispatch_stream_declaration_standalone(quote)
+        } else {
+            self.buffer.require("?>")?;
+
+            self.ratchet(Initial);
+            Ok(Some(DeclarationClose))
+        }
+    }
+
+    fn dispatch_stream_declaration_standalone(&mut self, quote: Quote) -> Result<Option<Tok>> {
+        use {State::*, Token::*};
+
+        let value = self.buffer.attribute_value(quote)?;
+
+        self.to_advance = *value.unify();
+
+        if value.is_complete() {
+            self.ratchet(AfterDeclarationStandalone);
+            self.to_advance += quote.as_ref().len(); // Include the closing quote
+        }
+
+        Ok(Some(DeclarationStandalone(value)))
+    }
+
+    fn dispatch_after_declaration_standalone(&mut self) -> Result<Option<Tok>> {
+        self.consume_space(
+            State::AfterDeclarationStandaloneSpace,
+            Self::dispatch_after_declaration_standalone_space,
+        )
+    }
+
+    fn dispatch_after_declaration_standalone_space(&mut self) -> Result<Option<Tok>> {
         use {State::*, Token::*};
 
         self.buffer.require("?>")?;
@@ -1540,6 +1593,7 @@ impl FuseCore {
         fuse_tokens! {
             DeclarationStart(val),
             DeclarationEncoding(val),
+            DeclarationStandalone(val),
             DeclarationClose,
 
             ElementOpenStart(val),
@@ -1694,6 +1748,42 @@ mod test {
             [
                 DeclarationStart(Complete("1.0")),
                 DeclarationEncoding(Complete("encoding")),
+                DeclarationClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn xml_declaration_standalone() -> Result {
+        let tokens =
+            Parser::new_from_str(r#"<?xml version="1.0" standalone="yes"?>"#).collect_owned()?;
+
+        assert_eq!(
+            tokens,
+            [
+                DeclarationStart(Complete("1.0")),
+                DeclarationStandalone(Complete("yes")),
+                DeclarationClose,
+            ],
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn xml_declaration_encoding_and_standalone() -> Result {
+        let tokens =
+            Parser::new_from_str(r#"<?xml version="1.0" encoding="UCS-2" standalone="yes"?>"#)
+                .collect_owned()?;
+
+        assert_eq!(
+            tokens,
+            [
+                DeclarationStart(Complete("1.0")),
+                DeclarationEncoding(Complete("UCS-2")),
+                DeclarationStandalone(Complete("yes")),
                 DeclarationClose,
             ],
         );

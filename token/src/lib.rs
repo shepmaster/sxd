@@ -57,6 +57,8 @@ impl_token! {
         DeclarationStart(T),
         /// encoding="foo"
         DeclarationEncoding(T),
+        /// standalone="no"
+        DeclarationStandalone(T),
         /// `?>`
         DeclarationClose,
 
