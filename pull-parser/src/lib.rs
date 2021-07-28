@@ -2599,6 +2599,11 @@ mod test {
         }))
     }
 
+    #[test]
+    fn ensure_state_is_small() {
+        assert_eq!(2, std::mem::size_of::<State>());
+    }
+
     mod fuse {
         use super::*;
 
