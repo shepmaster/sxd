@@ -540,12 +540,27 @@ enum State {
 
     AfterDeclarationOpen,
     AfterDeclarationOpenSpace,
+
+    AfterDeclarationVersionAttribute,
+    AfterDeclarationVersionAttributeSpace,
+    AfterDeclarationVersionAttributeEquals,
+    AfterDeclarationVersionAttributeEqualsSpace,
     StreamDeclarationVersion(Quote),
     AfterDeclarationVersion,
     AfterDeclarationVersionSpace,
+
+    AfterDeclarationEncodingAttribute,
+    AfterDeclarationEncodingAttributeSpace,
+    AfterDeclarationEncodingAttributeEquals,
+    AfterDeclarationEncodingAttributeEqualsSpace,
     StreamDeclarationEncoding(Quote),
     AfterDeclarationEncoding,
     AfterDeclarationEncodingSpace,
+
+    AfterDeclarationStandaloneAttribute,
+    AfterDeclarationStandaloneAttributeSpace,
+    AfterDeclarationStandaloneAttributeEquals,
+    AfterDeclarationStandaloneAttributeEqualsSpace,
     StreamDeclarationStandalone(Quote),
     AfterDeclarationStandalone,
     AfterDeclarationStandaloneSpace,
@@ -557,9 +572,11 @@ enum State {
 
     StreamAttributeName,
     AfterAttributeName,
+
     AfterAttributeNameSpace,
-    AfterAttributeEquals,
-    AfterAttributeEqualsSpace,
+    AfterAttributeNameEquals,
+    AfterAttributeNameEqualsSpace,
+
     AfterAttributeOpenQuote(Quote),
     StreamAttributeValueLiteral(Quote),
     StreamAttributeValueReferenceHex(Quote),
@@ -633,6 +650,35 @@ pub struct CoreParser {
     rollback_to: RollbackState,
 }
 
+macro_rules! dispatch_eq_value {
+    ($k:ident) => {
+        paste::paste! {
+            fn [<dispatch_after_ $k>](&mut self) -> Result<Option<Tok>> {
+                self.consume_space(
+                    State::[<After $k:camel Space>],
+                    Self::[<dispatch_after_ $k _space>],
+                )
+            }
+
+            fn [<dispatch_after_ $k _space>](&mut self) -> Result<Option<Tok>> {
+                use State::*;
+
+                self.buffer.require("=")?;
+
+                self.ratchet([<After $k:camel Equals>]);
+                self.[<dispatch_after_ $k _equals>]()
+            }
+
+            fn [<dispatch_after_ $k _equals>](&mut self) -> Result<Option<Tok>> {
+                self.consume_space(
+                    State::[<After $k:camel EqualsSpace>],
+                    Self::[<dispatch_after_ $k _equals_space>],
+                )
+            }
+        }
+    };
+}
+
 impl CoreParser {
     pub fn new() -> Self {
         Self::with_capacity(StringRing::DEFAULT_CAPACITY)
@@ -696,12 +742,49 @@ impl CoreParser {
 
             AfterDeclarationOpen => self.dispatch_after_declaration_open(),
             AfterDeclarationOpenSpace => self.dispatch_after_declaration_open_space(),
+
+            AfterDeclarationVersionAttribute => self.dispatch_after_declaration_version_attribute(),
+            AfterDeclarationVersionAttributeSpace => {
+                self.dispatch_after_declaration_version_attribute_space()
+            }
+            AfterDeclarationVersionAttributeEquals => {
+                self.dispatch_after_declaration_version_attribute_equals()
+            }
+            AfterDeclarationVersionAttributeEqualsSpace => {
+                self.dispatch_after_declaration_version_attribute_equals_space()
+            }
             StreamDeclarationVersion(quote) => self.dispatch_stream_declaration_version(quote),
             AfterDeclarationVersion => self.dispatch_after_declaration_version(),
             AfterDeclarationVersionSpace => self.dispatch_after_declaration_version_space(),
+
+            AfterDeclarationEncodingAttribute => {
+                self.dispatch_after_declaration_encoding_attribute()
+            }
+            AfterDeclarationEncodingAttributeSpace => {
+                self.dispatch_after_declaration_encoding_attribute_space()
+            }
+            AfterDeclarationEncodingAttributeEquals => {
+                self.dispatch_after_declaration_encoding_attribute_equals()
+            }
+            AfterDeclarationEncodingAttributeEqualsSpace => {
+                self.dispatch_after_declaration_encoding_attribute_equals_space()
+            }
             StreamDeclarationEncoding(quote) => self.dispatch_stream_declaration_encoding(quote),
             AfterDeclarationEncoding => self.dispatch_after_declaration_encoding(),
             AfterDeclarationEncodingSpace => self.dispatch_after_declaration_encoding_space(),
+
+            AfterDeclarationStandaloneAttribute => {
+                self.dispatch_after_declaration_standalone_attribute()
+            }
+            AfterDeclarationStandaloneAttributeSpace => {
+                self.dispatch_after_declaration_standalone_attribute_space()
+            }
+            AfterDeclarationStandaloneAttributeEquals => {
+                self.dispatch_after_declaration_standalone_attribute_equals()
+            }
+            AfterDeclarationStandaloneAttributeEqualsSpace => {
+                self.dispatch_after_declaration_standalone_attribute_equals_space()
+            }
             StreamDeclarationStandalone(quote) => {
                 self.dispatch_stream_declaration_standalone(quote)
             }
@@ -722,8 +805,8 @@ impl CoreParser {
             }
             AfterAttributeName => self.dispatch_after_attribute_name(),
             AfterAttributeNameSpace => self.dispatch_after_attribute_name_space(),
-            AfterAttributeEquals => self.dispatch_after_attribute_equals(),
-            AfterAttributeEqualsSpace => self.dispatch_after_attribute_equals_space(),
+            AfterAttributeNameEquals => self.dispatch_after_attribute_name_equals(),
+            AfterAttributeNameEqualsSpace => self.dispatch_after_attribute_name_equals_space(),
             AfterAttributeOpenQuote(quote) => self.dispatch_after_attribute_open_quote(quote),
             StreamAttributeValueLiteral(quote) => {
                 self.dispatch_stream_attribute_value_literal(quote)
@@ -857,13 +940,17 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_open_space(&mut self) -> Result<Option<Tok>> {
-        use State::*;
-
         self.buffer.require("version")?;
-        self.buffer.require("=")?;
+        self.ratchet(State::AfterDeclarationVersionAttribute);
+        self.dispatch_after_declaration_version_attribute()
+    }
+
+    dispatch_eq_value!(declaration_version_attribute);
+
+    fn dispatch_after_declaration_version_attribute_equals_space(&mut self) -> Result<Option<Tok>> {
         let quote = self.buffer.require_quote()?;
 
-        self.ratchet(StreamDeclarationVersion(quote));
+        self.ratchet(State::StreamDeclarationVersion(quote));
         return self.dispatch_stream_declaration_version(quote);
     }
 
@@ -894,23 +981,28 @@ impl CoreParser {
 
         // TODO: this should require that we've seen a space in order to be allowed
         if *self.buffer.consume("encoding")? {
-            self.buffer.require("=")?;
-            let quote = self.buffer.require_quote()?;
-
-            self.ratchet(StreamDeclarationEncoding(quote));
-            self.dispatch_stream_declaration_encoding(quote)
+            self.ratchet(AfterDeclarationEncodingAttribute);
+            self.dispatch_after_declaration_encoding_attribute()
         } else if *self.buffer.consume("standalone")? {
-            self.buffer.require("=")?;
-            let quote = self.buffer.require_quote()?;
-
-            self.ratchet(StreamDeclarationStandalone(quote));
-            self.dispatch_stream_declaration_standalone(quote)
+            self.ratchet(AfterDeclarationStandaloneAttribute);
+            self.dispatch_after_declaration_standalone_attribute()
         } else {
             self.buffer.require("?>")?;
 
             self.ratchet(Initial);
             Ok(Some(DeclarationClose))
         }
+    }
+
+    dispatch_eq_value!(declaration_encoding_attribute);
+
+    fn dispatch_after_declaration_encoding_attribute_equals_space(
+        &mut self,
+    ) -> Result<Option<Tok>> {
+        let quote = self.buffer.require_quote()?;
+
+        self.ratchet(State::StreamDeclarationEncoding(quote));
+        self.dispatch_stream_declaration_encoding(quote)
     }
 
     fn dispatch_stream_declaration_encoding(&mut self, quote: Quote) -> Result<Option<Tok>> {
@@ -939,17 +1031,25 @@ impl CoreParser {
         use {State::*, Token::*};
 
         if *self.buffer.consume("standalone")? {
-            self.buffer.require("=")?;
-            let quote = self.buffer.require_quote()?;
-
-            self.ratchet(StreamDeclarationStandalone(quote));
-            self.dispatch_stream_declaration_standalone(quote)
+            self.ratchet(AfterDeclarationStandaloneAttribute);
+            self.dispatch_after_declaration_standalone_attribute()
         } else {
             self.buffer.require("?>")?;
 
             self.ratchet(Initial);
             Ok(Some(DeclarationClose))
         }
+    }
+
+    dispatch_eq_value!(declaration_standalone_attribute);
+
+    fn dispatch_after_declaration_standalone_attribute_equals_space(
+        &mut self,
+    ) -> Result<Option<Tok>> {
+        let quote = self.buffer.require_quote()?;
+
+        self.ratchet(State::StreamDeclarationStandalone(quote));
+        self.dispatch_stream_declaration_standalone(quote)
     }
 
     fn dispatch_stream_declaration_standalone(&mut self, quote: Quote) -> Result<Option<Tok>> {
@@ -1043,30 +1143,9 @@ impl CoreParser {
         self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeStart)
     }
 
-    fn dispatch_after_attribute_name(&mut self) -> Result<Option<Tok>> {
-        self.consume_space(
-            State::AfterAttributeNameSpace,
-            Self::dispatch_after_attribute_name_space,
-        )
-    }
+    dispatch_eq_value!(attribute_name);
 
-    fn dispatch_after_attribute_name_space(&mut self) -> Result<Option<Tok>> {
-        use State::*;
-
-        self.buffer.require("=")?;
-
-        self.ratchet(AfterAttributeEquals);
-        self.dispatch_after_attribute_equals()
-    }
-
-    fn dispatch_after_attribute_equals(&mut self) -> Result<Option<Tok>> {
-        self.consume_space(
-            State::AfterAttributeEqualsSpace,
-            Self::dispatch_after_attribute_equals_space,
-        )
-    }
-
-    fn dispatch_after_attribute_equals_space(&mut self) -> Result<Option<Tok>> {
+    fn dispatch_after_attribute_name_equals_space(&mut self) -> Result<Option<Tok>> {
         use State::*;
 
         let quote = self.buffer.require_quote()?;
@@ -1898,6 +1977,18 @@ mod test {
     }
 
     #[test]
+    fn xml_declaration_with_spaces_around_attributes() -> Result {
+        expect(r#"<?xml version = "1.0" encoding = "UCS-2" standalone = "yes" ?>"#).to(
+            be_parsed_as([
+                DeclarationStart(Complete("1.0")),
+                DeclarationEncoding(Complete("UCS-2")),
+                DeclarationStandalone(Complete("yes")),
+                DeclarationClose,
+            ]),
+        )
+    }
+
+    #[test]
     fn self_closed_element() -> Result {
         expect(r#"<alpha />"#).to(be_parsed_as([
             ElementOpenStart(Complete("alpha")),
@@ -2292,18 +2383,37 @@ mod test {
         }
 
         #[test]
-        fn after_declaration_version() -> Result {
+        fn after_declaration_version_into_encoding() -> Result {
             for i in 1..=64 {
-                let input = format!("<?xml version='1.0'{}?>", " ".repeat(i));
+                let input = format!("<?xml version='1.0'{}encoding='UTF-8' ?>", " ".repeat(i));
                 expect(&*input).with(capacity(32)).to(parse)?;
             }
 
-            let input = "<?xml version='1.0'                                            ?>";
+            let input = "<?xml version='1.0'     encoding='UTF-8' ?>";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
 
             expect(&*input).with(capacity(32)).to(be_parsed_as([
                 DeclarationStart(Complete("1.0")),
+                DeclarationEncoding(Complete("UTF-8")),
+                DeclarationClose,
+            ]))
+        }
+
+        #[test]
+        fn after_declaration_standalone_into_standalone() -> Result {
+            for i in 1..=64 {
+                let input = format!("<?xml version='1.0'{}standalone='no' ?>", " ".repeat(i));
+                expect(&*input).with(capacity(32)).to(parse)?;
+            }
+
+            let input = "<?xml version='1.0'   standalone='no' ?>";
+            //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+            //           0               1               2               3
+
+            expect(&*input).with(capacity(32)).to(be_parsed_as([
+                DeclarationStart(Complete("1.0")),
+                DeclarationStandalone(Complete("no")),
                 DeclarationClose,
             ]))
         }
