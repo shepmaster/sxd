@@ -1684,12 +1684,144 @@ mod test {
     use super::*;
     use {Streaming::*, Token::*};
 
-    type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+    type BoxError = Box<dyn std::error::Error>;
+    type Result<T = (), E = BoxError> = std::result::Result<T, E>;
+
+    type OwnedTokens = Vec<Token<Streaming<String>>>;
+
+    #[derive(Debug)]
+    struct Expected<T>(T);
+    use Expected as expect;
+
+    trait Assertion<Actual> {
+        type Error;
+
+        fn assert(self, actual: Actual) -> Result<(), Self::Error>;
+    }
+
+    impl<T> Expected<T> {
+        #[track_caller]
+        fn to<A>(self, assertion: A) -> Result<(), A::Error>
+        where
+            A: Assertion<T>,
+        {
+            assertion.assert(self.0)
+        }
+
+        fn with<F, U>(self, modifier: F) -> Expected<U>
+        where
+            F: FnOnce(T) -> U,
+        {
+            Expected(modifier(self.0))
+        }
+    }
+
+    // Would prefer that this be `IntoParser`, but that seems to run
+    // into https://github.com/rust-lang/rust/issues/70263
+    trait TryIntoTokens {
+        type Error;
+
+        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error>;
+    }
+
+    impl<'a> TryIntoTokens for &'a str {
+        type Error = Error;
+
+        #[track_caller]
+        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
+            self.as_bytes().try_into_tokens()
+        }
+    }
+
+    impl<'a> TryIntoTokens for &'a [u8] {
+        type Error = Error;
+
+        #[track_caller]
+        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
+            Parser::with_buffer_capacity(self, StringRing::DEFAULT_CAPACITY).collect_owned()
+        }
+    }
+
+    struct WithCapacity<T>(T, usize);
+
+    fn capacity<'a, T>(c: usize) -> impl FnOnce(T) -> WithCapacity<T> {
+        move |v| WithCapacity(v, c)
+    }
+
+    fn minimum_capacity<T>(v: T) -> WithCapacity<T> {
+        WithCapacity(v, StringRing::MINIMUM_CAPACITY)
+    }
+
+    impl<'a> TryIntoTokens for WithCapacity<&'a str> {
+        type Error = Error;
+
+        #[track_caller]
+        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
+            WithCapacity(self.0.as_bytes(), self.1).try_into_tokens()
+        }
+    }
+
+    impl<'a> TryIntoTokens for WithCapacity<&'a [u8]> {
+        type Error = Error;
+
+        #[track_caller]
+        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
+            Parser::with_buffer_capacity(self.0, self.1).collect_owned()
+        }
+    }
+
+    struct BeParsedAsAssertion<const N: usize>([Token<Streaming<&'static str>>; N]);
+    use BeParsedAsAssertion as be_parsed_as;
+
+    impl<Actual, const N: usize> Assertion<Actual> for BeParsedAsAssertion<N>
+    where
+        Actual: TryIntoTokens,
+        BoxError: From<Actual::Error>,
+    {
+        type Error = BoxError;
+
+        #[track_caller]
+        fn assert(self, actual: Actual) -> Result<(), Self::Error> {
+            let tokens = actual.try_into_tokens()?;
+            assert_eq!(tokens, self.0);
+            Ok(())
+        }
+    }
+
+    struct ParseAssertion;
+    use ParseAssertion as parse;
+
+    impl<Actual> Assertion<Actual> for ParseAssertion
+    where
+        Actual: TryIntoTokens<Error = Error>,
+    {
+        type Error = Error;
+
+        #[track_caller]
+        fn assert(self, actual: Actual) -> Result<(), Self::Error> {
+            actual.try_into_tokens().map(drop)
+        }
+    }
+
+    struct FailParsingWithAssertion(fn(Result<OwnedTokens, Error>));
+
+    macro_rules! fail_parsing_with {
+        ($p:pat) => {{
+            FailParsingWithAssertion(|actual| {
+                assert!(
+                    matches!(actual, Err($p)),
+                    "Expected {}, but got {:?}",
+                    stringify!($p),
+                    actual,
+                )
+            })
+        }};
+    }
 
     macro_rules! assert_error {
-        ($e:expr, $p:pat $(if $guard:expr)?) => {
+        ($e:expr, $p:pat) => {
             assert!(
-                matches!($e, Err($p) $(if $guard)?),
+                matches!($e, Err($p)),
                 "Expected {}, but got {:?}",
                 stringify!($p),
                 $e,
@@ -1697,157 +1829,109 @@ mod test {
         };
     }
 
+    impl<Actual> Assertion<Actual> for FailParsingWithAssertion
+    where
+        Actual: TryIntoTokens<Error = Error>,
+    {
+        type Error = BoxError;
+
+        #[track_caller]
+        fn assert(self, actual: Actual) -> Result<(), Self::Error> {
+            self.0(actual.try_into_tokens());
+            Ok(())
+        }
+    }
+
     #[test]
     fn xml_declaration() -> Result {
-        let tokens = Parser::new_from_str(r#"<?xml version="1.0"?>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [DeclarationStart(Complete("1.0")), DeclarationClose],
-        );
-
-        Ok(())
+        expect(r#"<?xml version="1.0"?>"#).to(be_parsed_as([
+            DeclarationStart(Complete("1.0")),
+            DeclarationClose,
+        ]))
     }
 
     #[test]
     fn xml_declaration_small_capacity() -> Result {
-        let tokens = Parser::new_from_str_and_min_capacity(r#"<?xml version="1.123456789"?>"#)
-            .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect(r#"<?xml version="1.123456789"?>"#)
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 DeclarationStart(Partial("1")),
                 DeclarationStart(Complete(".123456789")),
                 DeclarationClose,
-            ],
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn xml_declaration_single_quoted() -> Result {
-        let tokens = Parser::new_from_str(r#"<?xml version='1.0'?>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [DeclarationStart(Complete("1.0")), DeclarationClose],
-        );
-
-        Ok(())
+        expect(r#"<?xml version='1.0'?>"#).to(be_parsed_as([
+            DeclarationStart(Complete("1.0")),
+            DeclarationClose,
+        ]))
     }
 
     #[test]
     fn xml_declaration_encoding() -> Result {
-        let tokens =
-            Parser::new_from_str(r#"<?xml version="1.0" encoding="encoding"?>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                DeclarationStart(Complete("1.0")),
-                DeclarationEncoding(Complete("encoding")),
-                DeclarationClose,
-            ],
-        );
-
-        Ok(())
+        expect(r#"<?xml version="1.0" encoding="encoding"?>"#).to(be_parsed_as([
+            DeclarationStart(Complete("1.0")),
+            DeclarationEncoding(Complete("encoding")),
+            DeclarationClose,
+        ]))
     }
 
     #[test]
     fn xml_declaration_standalone() -> Result {
-        let tokens =
-            Parser::new_from_str(r#"<?xml version="1.0" standalone="yes"?>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                DeclarationStart(Complete("1.0")),
-                DeclarationStandalone(Complete("yes")),
-                DeclarationClose,
-            ],
-        );
-
-        Ok(())
+        expect(r#"<?xml version="1.0" standalone="yes"?>"#).to(be_parsed_as([
+            DeclarationStart(Complete("1.0")),
+            DeclarationStandalone(Complete("yes")),
+            DeclarationClose,
+        ]))
     }
 
     #[test]
     fn xml_declaration_encoding_and_standalone() -> Result {
-        let tokens =
-            Parser::new_from_str(r#"<?xml version="1.0" encoding="UCS-2" standalone="yes"?>"#)
-                .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                DeclarationStart(Complete("1.0")),
-                DeclarationEncoding(Complete("UCS-2")),
-                DeclarationStandalone(Complete("yes")),
-                DeclarationClose,
-            ],
-        );
-
-        Ok(())
+        expect(r#"<?xml version="1.0" encoding="UCS-2" standalone="yes"?>"#).to(be_parsed_as([
+            DeclarationStart(Complete("1.0")),
+            DeclarationEncoding(Complete("UCS-2")),
+            DeclarationStandalone(Complete("yes")),
+            DeclarationClose,
+        ]))
     }
 
     #[test]
     fn self_closed_element() -> Result {
-        let tokens = Parser::new_from_str(r#"<alpha />"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [ElementOpenStart(Complete("alpha")), ElementSelfClose]
-        );
-
-        Ok(())
+        expect(r#"<alpha />"#).to(be_parsed_as([
+            ElementOpenStart(Complete("alpha")),
+            ElementSelfClose,
+        ]))
     }
 
     #[test]
     fn self_closed_element_small_capacity() -> Result {
-        let tokens = Parser::new_from_str_and_min_capacity(r#"<a01234567890123456789 />"#)
-            .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect(r#"<a01234567890123456789 />"#)
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
                 ElementSelfClose,
-            ]
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn self_closed_element_with_one_attribute() -> Result {
-        let tokens = Parser::new_from_str(r#"<alpha a="b"/>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("alpha")),
-                AttributeStart(Complete("a")),
-                AttributeValueLiteral(Complete("b")),
-                AttributeValueEnd,
-                ElementSelfClose,
-            ],
-        );
-
-        Ok(())
+        expect(r#"<alpha a="b"/>"#).to(be_parsed_as([
+            ElementOpenStart(Complete("alpha")),
+            AttributeStart(Complete("a")),
+            AttributeValueLiteral(Complete("b")),
+            AttributeValueEnd,
+            ElementSelfClose,
+        ]))
     }
 
     #[test]
     fn self_closed_element_with_one_attribute_small_capacity() -> Result {
-        let tokens = Parser::new_from_str_and_min_capacity(
-            r#"<a01234567890123456789 b01234567890123456789="c01234567890123456789"/>"#,
-        )
-        .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect(r#"<a01234567890123456789 b01234567890123456789="c01234567890123456789"/>"#)
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
                 AttributeStart(Partial("b01234567")),
@@ -1856,427 +1940,262 @@ mod test {
                 AttributeValueLiteral(Complete("56789")),
                 AttributeValueEnd,
                 ElementSelfClose,
-            ],
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn attributes_with_both_quote_styles() -> Result {
-        let tokens = Parser::new_from_str(r#"<alpha a="b" c='d'/>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("alpha")),
-                AttributeStart(Complete("a")),
-                AttributeValueLiteral(Complete("b")),
-                AttributeValueEnd,
-                AttributeStart(Complete("c")),
-                AttributeValueLiteral(Complete("d")),
-                AttributeValueEnd,
-                ElementSelfClose,
-            ],
-        );
-
-        Ok(())
+        expect(r#"<alpha a="b" c='d'/>"#).to(be_parsed_as([
+            ElementOpenStart(Complete("alpha")),
+            AttributeStart(Complete("a")),
+            AttributeValueLiteral(Complete("b")),
+            AttributeValueEnd,
+            AttributeStart(Complete("c")),
+            AttributeValueLiteral(Complete("d")),
+            AttributeValueEnd,
+            ElementSelfClose,
+        ]))
     }
 
     #[test]
     fn attribute_with_escaped_less_than_and_ampersand() -> Result {
-        let tokens = Parser::new_from_str("<a b='&lt;&amp;' />").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("a")),
-                AttributeStart(Complete("b")),
-                AttributeValueReferenceNamed(Complete("lt")),
-                AttributeValueReferenceNamed(Complete("amp")),
-                AttributeValueEnd,
-                ElementSelfClose,
-            ],
-        );
-
-        Ok(())
+        expect("<a b='&lt;&amp;' />").to(be_parsed_as([
+            ElementOpenStart(Complete("a")),
+            AttributeStart(Complete("b")),
+            AttributeValueReferenceNamed(Complete("lt")),
+            AttributeValueReferenceNamed(Complete("amp")),
+            AttributeValueEnd,
+            ElementSelfClose,
+        ]))
     }
 
     #[test]
     fn attribute_with_references() -> Result {
-        let tokens = Parser::new_from_str("<a b='&ten;&#10;&#x10;' />").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("a")),
-                AttributeStart(Complete("b")),
-                AttributeValueReferenceNamed(Complete("ten")),
-                AttributeValueReferenceDecimal(Complete("10")),
-                AttributeValueReferenceHex(Complete("10")),
-                AttributeValueEnd,
-                ElementSelfClose,
-            ],
-        );
-
-        Ok(())
+        expect("<a b='&ten;&#10;&#x10;' />").to(be_parsed_as([
+            ElementOpenStart(Complete("a")),
+            AttributeStart(Complete("b")),
+            AttributeValueReferenceNamed(Complete("ten")),
+            AttributeValueReferenceDecimal(Complete("10")),
+            AttributeValueReferenceHex(Complete("10")),
+            AttributeValueEnd,
+            ElementSelfClose,
+        ]))
     }
 
     #[test]
     fn element_with_no_children() -> Result {
-        let tokens = Parser::new_from_str(r#"<alpha></alpha>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("alpha")),
-                ElementOpenEnd,
-                ElementClose(Complete("alpha")),
-            ],
-        );
-
-        Ok(())
+        expect(r#"<alpha></alpha>"#).to(be_parsed_as([
+            ElementOpenStart(Complete("alpha")),
+            ElementOpenEnd,
+            ElementClose(Complete("alpha")),
+        ]))
     }
 
     #[test]
     fn element_with_no_children_small_capacity() -> Result {
-        let tokens = Parser::new_from_str_and_min_capacity(
-            r#"<a01234567890123456789></a01234567890123456789>"#,
-        )
-        .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect(r#"<a01234567890123456789></a01234567890123456789>"#)
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
                 ElementOpenEnd,
                 ElementClose(Partial("a012345")),
                 ElementClose(Complete("67890123456789")),
-            ],
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn element_with_one_child() -> Result {
-        let tokens = Parser::new_from_str(r#"<alpha><beta /></alpha>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("alpha")),
-                ElementOpenEnd,
-                ElementOpenStart(Complete("beta")),
-                ElementSelfClose,
-                ElementClose(Complete("alpha")),
-            ],
-        );
-
-        Ok(())
+        expect(r#"<alpha><beta /></alpha>"#).to(be_parsed_as([
+            ElementOpenStart(Complete("alpha")),
+            ElementOpenEnd,
+            ElementOpenStart(Complete("beta")),
+            ElementSelfClose,
+            ElementClose(Complete("alpha")),
+        ]))
     }
 
     #[test]
     fn char_data() -> Result {
-        let tokens = Parser::new_from_str("<a>b</a>").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("a")),
-                ElementOpenEnd,
-                CharData(Complete("b")),
-                ElementClose(Complete("a")),
-            ],
-        );
-
-        Ok(())
+        expect("<a>b</a>").to(be_parsed_as([
+            ElementOpenStart(Complete("a")),
+            ElementOpenEnd,
+            CharData(Complete("b")),
+            ElementClose(Complete("a")),
+        ]))
     }
 
     #[test]
     fn char_data_small_capacity() -> Result {
-        let tokens = Parser::new_from_str_and_min_capacity(r#"<a>01234567890123456789</a>"#)
-            .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect(r#"<a>01234567890123456789</a>"#)
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ElementOpenStart(Complete("a")),
                 ElementOpenEnd,
                 CharData(Partial("0123456789012")),
                 CharData(Complete("3456789")),
-                ElementClose(Complete("a"))
-            ],
-        );
-
-        Ok(())
+                ElementClose(Complete("a")),
+            ]))
     }
 
     #[test]
     fn char_data_with_close_square_bracket() -> Result {
-        let tokens = Parser::new_from_str("<a>b]</a>").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ElementOpenStart(Complete("a")),
-                ElementOpenEnd,
-                CharData(Complete("b]")),
-                ElementClose(Complete("a")),
-            ],
-        );
-
-        Ok(())
+        expect("<a>b]</a>").to(be_parsed_as([
+            ElementOpenStart(Complete("a")),
+            ElementOpenEnd,
+            CharData(Complete("b]")),
+            ElementClose(Complete("a")),
+        ]))
     }
 
     #[test]
     fn cdata() -> Result {
-        let tokens = Parser::new_from_str("<![CDATA[ hello ]]>").collect_owned()?;
-
-        assert_eq!(tokens, [CData(Complete(" hello "))]);
-
-        Ok(())
+        expect("<![CDATA[ hello ]]>").to(be_parsed_as([CData(Complete(" hello "))]))
     }
 
     #[test]
     fn cdata_small_buffer() -> Result {
-        let tokens = Parser::new_from_str_and_min_capacity("<![CDATA[aaaaaaaaaaaaaaaaaaaa]]>")
-            .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [CData(Partial("aaaaaaa")), CData(Complete("aaaaaaaaaaaaa"))]
-        );
-
-        Ok(())
+        expect("<![CDATA[aaaaaaaaaaaaaaaaaaaa]]>")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
+                CData(Partial("aaaaaaa")),
+                CData(Complete("aaaaaaaaaaaaa")),
+            ]))
     }
 
     #[test]
     fn only_space() -> Result {
-        let tokens = Parser::new_from_str(" \t\r\n").collect_owned()?;
-
-        assert_eq!(tokens, [CharData(Partial(" \t\r\n"))]);
-
-        Ok(())
+        expect(" \t\r\n").to(be_parsed_as([CharData(Partial(" \t\r\n"))]))
     }
 
     #[test]
     fn leading_and_trailing_whitespace_self_closed() -> Result {
-        let tokens = Parser::new_from_str("\t <a/>\r\n").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                CharData(Complete("\t ")),
-                ElementOpenStart(Complete("a")),
-                ElementSelfClose,
-                CharData(Partial("\r\n")),
-            ],
-        );
-
-        Ok(())
+        expect("\t <a/>\r\n").to(be_parsed_as([
+            CharData(Complete("\t ")),
+            ElementOpenStart(Complete("a")),
+            ElementSelfClose,
+            CharData(Partial("\r\n")),
+        ]))
     }
 
     #[test]
     fn leading_and_trailing_whitespace() -> Result {
-        let tokens = Parser::new_from_str("\t <a></a>\r\n").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                CharData(Complete("\t ")),
-                ElementOpenStart(Complete("a")),
-                ElementOpenEnd,
-                ElementClose(Complete("a")),
-                CharData(Partial("\r\n")),
-            ],
-        );
-
-        Ok(())
+        expect("\t <a></a>\r\n").to(be_parsed_as([
+            CharData(Complete("\t ")),
+            ElementOpenStart(Complete("a")),
+            ElementOpenEnd,
+            ElementClose(Complete("a")),
+            CharData(Partial("\r\n")),
+        ]))
     }
 
     #[test]
     fn processing_instruction() -> Result {
-        let tokens = Parser::new_from_str("<?a?>").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ProcessingInstructionStart(Complete("a")),
-                ProcessingInstructionEnd,
-            ],
-        );
-
-        Ok(())
+        expect("<?a?>").to(be_parsed_as([
+            ProcessingInstructionStart(Complete("a")),
+            ProcessingInstructionEnd,
+        ]))
     }
 
     #[test]
     fn processing_instruction_small_capacity() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa?>").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect("<?aaaaaaaaaaaaaaaaaaaa?>")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
                 ProcessingInstructionStart(Complete("aaaaaa")),
                 ProcessingInstructionEnd,
-            ],
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn processing_instruction_starts_with_xml() -> Result {
-        let tokens = Parser::new_from_str("<?xml-but-not-that?>").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ProcessingInstructionStart(Complete("xml-but-not-that")),
-                ProcessingInstructionEnd,
-            ],
-        );
-
-        Ok(())
+        expect("<?xml-but-not-that?>").to(be_parsed_as([
+            ProcessingInstructionStart(Complete("xml-but-not-that")),
+            ProcessingInstructionEnd,
+        ]))
     }
 
     #[test]
     fn processing_instruction_with_value() -> Result {
-        let tokens = Parser::new_from_str("<?a b?>").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ProcessingInstructionStart(Complete("a")),
-                ProcessingInstructionValue(Complete("b")),
-                ProcessingInstructionEnd,
-            ],
-        );
-
-        Ok(())
+        expect("<?a b?>").to(be_parsed_as([
+            ProcessingInstructionStart(Complete("a")),
+            ProcessingInstructionValue(Complete("b")),
+            ProcessingInstructionEnd,
+        ]))
     }
 
     #[test]
     fn processing_instruction_with_value_small_buffer() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity("<?aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb?>")
-                .collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect("<?aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb?>")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ProcessingInstructionStart(Partial("aaaaaaaaaaaaaa")),
                 ProcessingInstructionStart(Complete("aaaaaa")),
                 ProcessingInstructionValue(Partial("bbbbbbbbb")),
                 ProcessingInstructionValue(Complete("bbbbbbbbbbb")),
-                ProcessingInstructionEnd
-            ],
-        );
-
-        Ok(())
+                ProcessingInstructionEnd,
+            ]))
     }
 
     #[test]
     fn comment() -> Result {
-        let tokens = Parser::new_from_str("<!-- hello -->").collect_owned()?;
-
-        assert_eq!(tokens, [Comment(Complete(" hello "))]);
-
-        Ok(())
+        expect("<!-- hello -->").to(be_parsed_as([Comment(Complete(" hello "))]))
     }
 
     #[test]
     fn comment_small_buffer() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity("<!--aaaaaaaaaaaaaaaaaaaa-->").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect("<!--aaaaaaaaaaaaaaaaaaaa-->")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 Comment(Partial("aaaaaaaaaaaa")),
                 Comment(Complete("aaaaaaaa")),
-            ]
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn reference_named() -> Result {
-        let tokens = Parser::new_from_str("&lt;").collect_owned()?;
-
-        assert_eq!(tokens, [ReferenceNamed(Complete("lt"))]);
-
-        Ok(())
+        expect("&lt;").to(be_parsed_as([ReferenceNamed(Complete("lt"))]))
     }
 
     #[test]
     fn reference_named_small_buffer() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity("&aaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect("&aaaaaaaaaaaaaaaaaaaa;")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ReferenceNamed(Partial("aaaaaaaaaaaaaaa")),
                 ReferenceNamed(Complete("aaaaa")),
-            ]
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn reference_decimal() -> Result {
-        let tokens = Parser::new_from_str("&#42;").collect_owned()?;
-
-        assert_eq!(tokens, [ReferenceDecimal(Complete("42"))]);
-
-        Ok(())
+        expect("&#42;").to(be_parsed_as([ReferenceDecimal(Complete("42"))]))
     }
 
     #[test]
     fn reference_decimal_small_buffer() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity("&#11111111111111111111;").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect("&#11111111111111111111;")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ReferenceDecimal(Partial("11111111111111")),
                 ReferenceDecimal(Complete("111111")),
-            ]
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
     fn reference_hex() -> Result {
-        let tokens = Parser::new_from_str("&#xBEEF;").collect_owned()?;
-
-        assert_eq!(tokens, [ReferenceHex(Complete("BEEF"))]);
-
-        Ok(())
+        expect("&#xBEEF;").to(be_parsed_as([ReferenceHex(Complete("BEEF"))]))
     }
 
     #[test]
     fn reference_hex_small_buffer() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity("&#xaaaaaaaaaaaaaaaaaaaa;").collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect("&#xaaaaaaaaaaaaaaaaaaaa;")
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ReferenceHex(Partial("aaaaaaaaaaaaa")),
                 ReferenceHex(Complete("aaaaaaa")),
-            ]
-        );
-
-        Ok(())
+            ]))
     }
 
     // After parsing a name to the end of the buffer, when we start
@@ -2284,19 +2203,13 @@ mod test {
     // non-start-char.
     #[test]
     fn names_that_span_blocks_can_continue_with_non_start_chars() -> Result {
-        let tokens =
-            Parser::new_from_str_and_min_capacity(r#"<a----------------/>"#).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
+        expect(r#"<a----------------/>"#)
+            .with(minimum_capacity)
+            .to(be_parsed_as([
                 ElementOpenStart(Partial("a--------------")),
                 ElementOpenStart(Complete("--")),
                 ElementSelfClose,
-            ],
-        );
-
-        Ok(())
+            ]))
     }
 
     #[test]
@@ -2305,11 +2218,9 @@ mod test {
         // we ran out of input, we got an error.
         let input = " ";
 
-        let tokens = Parser::new_from_str_and_min_capacity(input).collect_owned()?;
-
-        assert_eq!(tokens, [CharData(Partial(" "))]);
-
-        Ok(())
+        expect(input)
+            .with(minimum_capacity)
+            .to(be_parsed_as([CharData(Partial(" "))]))
     }
 
     #[test]
@@ -2318,67 +2229,42 @@ mod test {
         // buffer and the next.
         let input = "<?a aaaaaaaaaaaaaaaaaaaaaaaaaaa?>";
 
-        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                ProcessingInstructionStart(Complete("a")),
-                ProcessingInstructionValue(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
-                ProcessingInstructionValue(Complete("")),
-                ProcessingInstructionEnd,
-            ]
-        );
-
-        Ok(())
+        expect(input).with(capacity(32)).to(be_parsed_as([
+            ProcessingInstructionStart(Complete("a")),
+            ProcessingInstructionValue(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+            ProcessingInstructionValue(Complete("")),
+            ProcessingInstructionEnd,
+        ]))
     }
 
     #[test]
     fn multi_byte_comment_lookahead_that_spans_blocks_1() -> Result {
         let input = "<!--aaaaaaaaaaaaaaaaaaaaaaaaaaa-->";
         //                         The last byte is ^
-        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                Comment(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
-                Comment(Complete("")),
-            ]
-        );
-
-        Ok(())
+        expect(input).with(capacity(32)).to(be_parsed_as([
+            Comment(Partial("aaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+            Comment(Complete("")),
+        ]))
     }
 
     #[test]
     fn multi_byte_cdata_lookahead_that_spans_blocks_1() -> Result {
         let input = "<![CDATA[aaaaaaaaaaaaaaaaaaaaaa]]>";
         //      this is the last byte in the buffer ^
-        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [
-                CData(Partial("aaaaaaaaaaaaaaaaaaaaaa")),
-                CData(Complete("")),
-            ]
-        );
-
-        Ok(())
+        expect(input).with(capacity(32)).to(be_parsed_as([
+            CData(Partial("aaaaaaaaaaaaaaaaaaaaaa")),
+            CData(Complete("")),
+        ]))
     }
 
     #[test]
     fn multi_byte_cdata_lookahead_that_spans_blocks_2() -> Result {
         let input = "<![CDATA[aaaaaaaaaaaaaaaaaaaaa]]>";
         //      this is the last byte in the buffer ^
-        let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-        assert_eq!(
-            tokens,
-            [CData(Partial("aaaaaaaaaaaaaaaaaaaaa")), CData(Complete(""))],
-        );
-
-        Ok(())
+        expect(input).with(capacity(32)).to(be_parsed_as([
+            CData(Partial("aaaaaaaaaaaaaaaaaaaaa")),
+            CData(Complete("")),
+        ]))
     }
 
     /// These tests all focus on locations where arbitrary-length
@@ -2392,262 +2278,192 @@ mod test {
         fn after_declaration_open() -> Result {
             for i in 1..=64 {
                 let input = format!("<?xml{}version='1.0' ?>", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?
             }
 
             let input = "<?xml                  version='1.0' ?>";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
 
-            let tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
-
-            assert_eq!(
-                tokens,
-                [DeclarationStart(Complete("1.0")), DeclarationClose],
-            );
-
-            Ok(())
+            expect(&*input).with(capacity(32)).to(be_parsed_as([
+                DeclarationStart(Complete("1.0")),
+                DeclarationClose,
+            ]))
         }
 
         #[test]
         fn after_declaration_version() -> Result {
             for i in 1..=64 {
                 let input = format!("<?xml version='1.0'{}?>", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?;
             }
 
             let input = "<?xml version='1.0'                                            ?>";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
 
-            let tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
-
-            assert_eq!(
-                tokens,
-                [DeclarationStart(Complete("1.0")), DeclarationClose],
-            );
-
-            Ok(())
+            expect(&*input).with(capacity(32)).to(be_parsed_as([
+                DeclarationStart(Complete("1.0")),
+                DeclarationClose,
+            ]))
         }
 
         #[test]
         fn after_open_element_name() -> Result {
             for i in 1..=64 {
                 let input = format!("<a{}>", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?;
             }
 
             let input = "<a                                                             >";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-            assert_eq!(tokens, [ElementOpenStart(Complete("a")), ElementOpenEnd]);
-
-            Ok(())
+            expect(&*input).with(capacity(32)).to(be_parsed_as([
+                ElementOpenStart(Complete("a")),
+                ElementOpenEnd,
+            ]))
         }
 
         #[test]
         fn after_attribute_name() -> Result {
             for i in 1..=64 {
                 let input = format!("<a b{}='c' />", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?;
             }
 
             let input = "<a b                           ='c' />";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Complete("a")),
-                    AttributeStart(Complete("b")),
-                    AttributeValueLiteral(Complete("c")),
-                    AttributeValueEnd,
-                    ElementSelfClose,
-                ],
-            );
-
-            Ok(())
+            expect(input).with(capacity(32)).to(be_parsed_as([
+                ElementOpenStart(Complete("a")),
+                AttributeStart(Complete("b")),
+                AttributeValueLiteral(Complete("c")),
+                AttributeValueEnd,
+                ElementSelfClose,
+            ]))
         }
 
         #[test]
         fn after_attribute_equal() -> Result {
             for i in 1..=64 {
                 let input = format!("<a b={}'c' />", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?;
             }
 
             let input = "<a b=                              'c' />";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-            assert_eq!(
-                tokens,
-                [
-                    ElementOpenStart(Complete("a")),
-                    AttributeStart(Complete("b")),
-                    AttributeValueLiteral(Complete("c")),
-                    AttributeValueEnd,
-                    ElementSelfClose,
-                ],
-            );
-
-            Ok(())
+            expect(input).with(capacity(32)).to(be_parsed_as([
+                ElementOpenStart(Complete("a")),
+                AttributeStart(Complete("b")),
+                AttributeValueLiteral(Complete("c")),
+                AttributeValueEnd,
+                ElementSelfClose,
+            ]))
         }
 
         #[test]
         fn after_close_element() -> Result {
             for i in 1..=64 {
                 let input = format!("</a{}>", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?;
             }
 
             let input = "</a                               >";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-            assert_eq!(tokens, [ElementClose(Complete("a"))]);
-
-            Ok(())
+            expect(input)
+                .with(capacity(32))
+                .to(be_parsed_as([ElementClose(Complete("a"))]))
         }
 
         #[test]
         fn after_processing_instruction_name() -> Result {
             for i in 1..=64 {
                 let input = format!("<?a{}?>", " ".repeat(i));
-                let _tokens = Parser::new_from_str_and_capacity(&input, 32).collect_owned()?;
+                expect(&*input).with(capacity(32)).to(parse)?;
             }
 
             let input = "<?a                               ?>";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            let tokens = Parser::new_from_str_and_capacity(input, 32).collect_owned()?;
-
-            assert_eq!(
-                tokens,
-                [
-                    ProcessingInstructionStart(Complete("a")),
-                    ProcessingInstructionEnd,
-                ],
-            );
-
-            Ok(())
+            expect(input).with(capacity(32)).to(be_parsed_as([
+                ProcessingInstructionStart(Complete("a")),
+                ProcessingInstructionEnd,
+            ]))
         }
     }
 
     #[test]
     fn fail_declaration_unclosed() -> Result {
-        let error = Parser::new_from_str(r"<?xml").collect_owned();
-
-        assert_error!(error, Error::IncompleteXml);
-
-        Ok(())
+        expect(r"<?xml").to(fail_parsing_with!(Error::IncompleteXml))
     }
 
     #[test]
     fn fail_declaration_missing_version() -> Result {
-        let error = Parser::new_from_str(r"<?xml?>").collect_owned();
-
-        assert_error!(
-            error,
-            Error::RequiredTokenMissing {
-                token: RequiredToken::Version,
-                location: 5
-            }
-        );
-
-        Ok(())
+        expect(r"<?xml?>").to(fail_parsing_with!(Error::RequiredTokenMissing {
+            token: RequiredToken::Version,
+            location: 5
+        }))
     }
 
     #[test]
     fn fail_element_missing_space() -> Result {
-        let error = Parser::new_from_str(r"<a\b='c'>").collect_owned();
-
-        assert_error!(error, Error::RequiredSpaceMissing { location: 2 });
-
-        Ok(())
+        expect(r"<a\b='c'>").to(fail_parsing_with!(Error::RequiredSpaceMissing {
+            location: 2
+        }))
     }
 
     #[test]
     fn fail_attribute_with_unescaped_less_than() -> Result {
-        let error = Parser::new_from_str("<a b='<'").collect_owned();
-
-        assert_error!(error, Error::InvalidCharacterInAttribute { location: 6 });
-
-        Ok(())
+        expect("<a b='<'").to(fail_parsing_with!(Error::InvalidCharacterInAttribute {
+            location: 6
+        }))
     }
 
     #[test]
     fn fail_attribute_with_unescaped_ampersand() -> Result {
-        let error = Parser::new_from_str("<a b='&'").collect_owned();
-
-        assert_error!(
-            error,
-            Error::RequiredTokenMissing {
-                token: RequiredToken::Semicolon,
-                location: 7
-            }
-        );
-
-        Ok(())
+        expect("<a b='&'").to(fail_parsing_with!(Error::RequiredTokenMissing {
+            token: RequiredToken::Semicolon,
+            location: 7
+        }))
     }
 
     #[test]
     fn fail_processing_instruction_missing_space() -> Result {
-        let error = Parser::new_from_str(r"<?a\b?>").collect_owned();
-
-        assert_error!(error, Error::RequiredSpaceMissing { location: 3 });
-
-        Ok(())
+        expect(r"<?a\b?>").to(fail_parsing_with!(Error::RequiredSpaceMissing {
+            location: 3
+        }))
     }
 
     #[test]
     fn fail_comments_disallow_double_hyphens() -> Result {
-        let error = Parser::new_from_str("<!------>").collect_owned();
-
-        assert_error!(error, Error::DoubleHyphenInComment { location: 4 });
-
-        Ok(())
+        expect("<!------>").to(fail_parsing_with!(Error::DoubleHyphenInComment {
+            location: 4
+        }))
     }
 
     #[test]
     fn fail_comment_unclosed() -> Result {
-        let error = Parser::new_from_str(r##"<!--hello"##).collect_owned();
-
-        assert_error!(error, Error::IncompleteXml);
-
-        Ok(())
+        expect(r##"<!--hello"##).to(fail_parsing_with!(Error::IncompleteXml))
     }
 
     #[test]
     fn fail_processing_instruction_unclosed() -> Result {
-        let error = Parser::new_from_str(r"<?a").collect_owned();
-
-        assert_error!(error, Error::IncompleteXml);
-
-        Ok(())
+        expect(r"<?a").to(fail_parsing_with!(Error::IncompleteXml))
     }
 
     #[test]
     fn fail_disallowed_ascii_char() -> Result {
         let mut x = [b'a'; 20];
         x[19] = 0x07;
-        let error = Parser::new_from_bytes_and_capacity(&x, 16).collect_owned();
 
-        assert_error!(
-            error,
-            Error::InvalidChar {
+        expect(&x[..])
+            .with(capacity(16))
+            .to(fail_parsing_with!(Error::InvalidChar {
                 location: 19,
                 length: 1
-            }
-        );
-
-        Ok(())
+            }))
     }
 
     #[test]
@@ -2656,32 +2472,21 @@ mod test {
         x[17] = 0xEF;
         x[18] = 0xBF;
         x[19] = 0xBF;
-        let error = Parser::new_from_bytes_and_capacity(&x, 16).collect_owned();
 
-        assert_error!(
-            error,
-            Error::InvalidChar {
+        expect(&x[..])
+            .with(capacity(16))
+            .to(fail_parsing_with!(Error::InvalidChar {
                 location: 17,
                 length: 3
-            }
-        );
-
-        Ok(())
+            }))
     }
 
     #[test]
     fn fail_non_utf_8() -> Result {
-        let error = Parser::new_from_bytes(&[b'a', b'b', b'c', 0xFF]).collect_owned();
-
-        assert_error!(
-            error,
-            Error::InputNotUtf8 {
-                location: 3,
-                length: 1,
-            }
-        );
-
-        Ok(())
+        expect(&[b'a', b'b', b'c', 0xFF][..]).to(fail_parsing_with!(Error::InputNotUtf8 {
+            location: 3,
+            length: 1,
+        }))
     }
 
     mod fuse {
@@ -2735,33 +2540,11 @@ mod test {
         }
     }
 
-    impl<'a> Parser<&'a [u8]> {
-        fn new_from_str(s: &'a str) -> Self {
-            Self::new_from_str_and_capacity(s, StringRing::DEFAULT_CAPACITY)
-        }
-
-        fn new_from_str_and_min_capacity(s: &'a str) -> Self {
-            Self::new_from_str_and_capacity(s, StringRing::MINIMUM_CAPACITY)
-        }
-
-        fn new_from_str_and_capacity(s: &'a str, capacity: usize) -> Self {
-            Self::with_buffer_capacity(s.as_bytes(), capacity)
-        }
-
-        fn new_from_bytes(s: &'a [u8]) -> Self {
-            Self::new_from_bytes_and_capacity(s, StringRing::DEFAULT_CAPACITY)
-        }
-
-        fn new_from_bytes_and_capacity(s: &'a [u8], capacity: usize) -> Self {
-            Self::with_buffer_capacity(s, capacity)
-        }
-    }
-
     impl<R> Parser<R>
     where
         R: Read,
     {
-        fn collect_owned(&mut self) -> super::Result<Vec<Token<Streaming<String>>>> {
+        fn collect_owned(&mut self) -> super::Result<OwnedTokens> {
             let mut v = vec![];
             while let Some(t) = self.next() {
                 v.push(t?.map(|s| s.map(str::to_owned)));
