@@ -1,0 +1,16 @@
+[package]
+name = "sxd-mapper"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+derive = { package = "sxd-mapper-derive", path = "derive" }
+formatter = { package = "sxd-formatter", path = "../formatter" }
+pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
+token = { package = "sxd-token", path = "../token" }
+util = { package = "sxd-util", path = "../util" }
+validation = { package = "sxd-validation", path = "../validation" }
+
+paste = "1.0.5"

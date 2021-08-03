@@ -16,6 +16,8 @@ lto = "thin"
 
 [workspace]
 members = [
+    "mapper",
+    "mapper/derive",
     "pull-parser",
     "string-slab",
     "string-slab/benchmarks",

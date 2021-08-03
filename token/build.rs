@@ -213,8 +213,10 @@ fn main() -> Result<()> {
         let mut f = BufWriter::new(&mut f);
 
         writeln!(f, "{}", generate_token_kind())?;
+        writeln!(f, "{}", generate_token_variant())?;
         writeln!(f, "{}", generate_token())?;
-        writeln!(f, "{}", generate_token_inherent())?;
+        writeln!(f, "{}", generate_token_inherent_map())?;
+        writeln!(f, "{}", generate_token_inherent_variants())?;
         writeln!(f, "{}", generate_token_partialeq())?;
         writeln!(f, "{}", generate_uniform_kind())?;
 
@@ -239,6 +241,23 @@ fn generate_token_kind() -> proc_macro2::TokenStream {
     quote! {
         pub trait TokenKind {
             #(#associated_types;)*
+        }
+    }
+}
+
+fn generate_token_variant() -> proc_macro2::TokenStream {
+    let variants = TOKEN_DEFS.iter().map(|&d| {
+        let name = d.name_ident();
+
+        quote! {
+            #name
+        }
+    });
+
+    quote! {
+        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        pub enum TokenVariant {
+            #(#variants,)*
         }
     }
 }
@@ -270,7 +289,7 @@ fn generate_token() -> proc_macro2::TokenStream {
     }
 }
 
-fn generate_token_inherent() -> proc_macro2::TokenStream {
+fn generate_token_inherent_map() -> proc_macro2::TokenStream {
     let k1_requirements = defs_with_data().map(|&d| {
         let name = d.name_ident();
 
@@ -307,6 +326,70 @@ fn generate_token_inherent() -> proc_macro2::TokenStream {
                     #(#arms,)*
                 }
             }
+        }
+    }
+}
+
+fn generate_token_inherent_variants() -> proc_macro2::TokenStream {
+    let variant_arms = TOKEN_DEFS.iter().map(|&d| {
+        let TokenDef { has_data, .. } = d;
+        let name = d.name_ident();
+
+        if has_data {
+            quote! { Token::#name(..) => TokenVariant::#name }
+        } else {
+            quote! { Token::#name => TokenVariant::#name }
+        }
+    });
+
+    let is_variant_arms = TOKEN_DEFS.iter().map(|&d| {
+        let TokenDef { has_data, .. } = d;
+        let name = d.name_ident();
+
+        if has_data {
+            quote! { (Token::#name(..), TokenVariant::#name) => true }
+        } else {
+            quote! { (Token::#name, TokenVariant::#name) => true }
+        }
+    });
+
+    let try_into_x = defs_with_data().map(|&d| {
+        let name = d.name_ident();
+        let fn_name = format_ident!("try_into_{}", name);
+
+        quote! {
+            #[inline]
+            #[allow(non_snake_case)]
+            pub fn #fn_name(self) -> Result<K::#name, Self> {
+                match self {
+                    Token::#name(val) => Ok(val),
+                    rejected => Err(rejected),
+                }
+            }
+        }
+    });
+
+    quote! {
+        impl<K> Token<K>
+        where
+            K: TokenKind,
+        {
+            #[inline]
+            pub fn variant(&self) -> TokenVariant {
+                match self {
+                    #(#variant_arms,)*
+                }
+            }
+
+            #[inline]
+            pub fn is_variant(&self, variant: TokenVariant) -> bool {
+                match (self, variant) {
+                    #(#is_variant_arms,)*
+                    _ => false,
+                }
+            }
+
+            #(#try_into_x)*
         }
     }
 }
