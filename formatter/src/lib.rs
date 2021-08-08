@@ -1,5 +1,5 @@
 use std::{fmt, io::Write};
-use token::{Streaming, Token};
+use token::{Streaming, UniformToken};
 
 pub struct Formatter<W> {
     output: W,
@@ -48,7 +48,7 @@ where
         }
     }
 
-    pub fn write_token<V>(&mut self, token: Token<Streaming<V>>) -> std::io::Result<()>
+    pub fn write_token<V>(&mut self, token: UniformToken<Streaming<V>>) -> std::io::Result<()>
     where
         Streaming<V>: fmt::Debug + fmt::Display,
     {

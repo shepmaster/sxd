@@ -4,7 +4,7 @@ use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{collections::HashSet, io::Read};
 use string_slab::{CheckedArena, CheckedKey};
-use token::Token;
+use token::UniformToken;
 
 #[derive(Debug, Default)]
 struct ValidatorCore {
@@ -16,7 +16,7 @@ struct ValidatorCore {
 }
 
 impl ValidatorCore {
-    fn push<S>(&mut self, token: Token<S>) -> Result<Token<S>>
+    fn push<S>(&mut self, token: UniformToken<S>) -> Result<UniformToken<S>>
     where
         S: AsRef<str>,
     {
@@ -227,7 +227,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<Token<String>>> {
+    pub fn next(&mut self) -> Option<Result<UniformToken<String>>> {
         let Self { parser, core } = self;
 
         match parser.next() {
@@ -578,7 +578,7 @@ mod test {
     }
 
     impl ValidatorCore {
-        fn validate_all<S>(tokens: impl IntoIterator<Item = Token<S>>) -> super::Result<()>
+        fn validate_all<S>(tokens: impl IntoIterator<Item = UniformToken<S>>) -> super::Result<()>
         where
             S: AsRef<str>,
         {

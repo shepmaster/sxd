@@ -4,7 +4,7 @@
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
 use std::{io::Read, mem, str};
-use token::{Streaming, Token};
+use token::{Streaming, Token, UniformToken};
 
 #[macro_use]
 mod macros;
@@ -639,7 +639,7 @@ impl AsRef<str> for Quote {
     }
 }
 
-type Tok = Token<Streaming<usize>>;
+type Tok = UniformToken<Streaming<usize>>;
 type RollbackState = (usize, usize);
 
 #[derive(Debug)]
@@ -722,7 +722,7 @@ impl CoreParser {
     }
 
     #[inline]
-    pub fn next(&mut self) -> Option<Result<Token<Streaming<usize>>>> {
+    pub fn next(&mut self) -> Option<Result<UniformToken<Streaming<usize>>>> {
         use State::*;
 
         let to_advance = mem::take(&mut self.to_advance);
@@ -1578,7 +1578,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<Token<Streaming<&str>>>> {
+    pub fn next(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
         let Self {
             parser,
             source,
@@ -1618,11 +1618,11 @@ where
 
 #[derive(Debug, Default)]
 struct FuseCore {
-    current: Option<Token<String>>,
+    current: Option<UniformToken<String>>,
 }
 
 impl FuseCore {
-    fn push(&mut self, t: Token<Streaming<&str>>) -> Option<Token<String>> {
+    fn push(&mut self, t: UniformToken<Streaming<&str>>) -> Option<UniformToken<String>> {
         use {Streaming::*, Token::*};
 
         let Self { current } = self;
@@ -1702,7 +1702,7 @@ impl FuseCore {
         }
     }
 
-    fn finish(&mut self) -> Result<Option<Token<String>>, FuseError> {
+    fn finish(&mut self) -> Result<Option<UniformToken<String>>, FuseError> {
         match self.current.take() {
             Some(t @ Token::CharData(_)) => Ok(Some(t)),
             Some(_) => Incomplete.fail(),
@@ -1728,7 +1728,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<Token<String>, FuseError>> {
+    pub fn next(&mut self) -> Option<Result<UniformToken<String>, FuseError>> {
         let Self { inner, core } = self;
         while let Some(t) = inner.next() {
             match t {
@@ -1766,7 +1766,7 @@ mod test {
     type BoxError = Box<dyn std::error::Error>;
     type Result<T = (), E = BoxError> = std::result::Result<T, E>;
 
-    type OwnedTokens = Vec<Token<Streaming<String>>>;
+    type OwnedTokens = Vec<UniformToken<Streaming<String>>>;
 
     #[derive(Debug)]
     struct Expected<T>(T);
@@ -1849,7 +1849,7 @@ mod test {
         }
     }
 
-    struct BeParsedAsAssertion<const N: usize>([Token<Streaming<&'static str>>; N]);
+    struct BeParsedAsAssertion<const N: usize>([UniformToken<Streaming<&'static str>>; N]);
     use BeParsedAsAssertion as be_parsed_as;
 
     impl<Actual, const N: usize> Assertion<Actual> for BeParsedAsAssertion<N>
@@ -2625,7 +2625,7 @@ mod test {
             assert_eq!(
                 tokens,
                 [
-                    ElementOpenStart("aaaaaaaaaa"),
+                    UniformToken::<&str>::ElementOpenStart("aaaaaaaaaa"),
                     AttributeStart("bbbbbbbbbb"),
                     AttributeValueLiteral("ccc"),
                     AttributeValueEnd,
@@ -2640,7 +2640,7 @@ mod test {
         fn unfinished_character_data_is_returned() -> Result {
             let tokens = FuseCore::fuse_all(vec![CharData(Partial("a"))])?;
 
-            assert_eq!(tokens, [CharData("a"),],);
+            assert_eq!(tokens, [UniformToken::<&str>::CharData("a"),],);
 
             Ok(())
         }
@@ -2670,8 +2670,8 @@ mod test {
 
     impl FuseCore {
         fn fuse_all<'a>(
-            tokens: impl IntoIterator<Item = Token<Streaming<&'a str>>>,
-        ) -> super::Result<Vec<Token<String>>, super::FuseError> {
+            tokens: impl IntoIterator<Item = UniformToken<Streaming<&'a str>>>,
+        ) -> super::Result<Vec<UniformToken<String>>, super::FuseError> {
             let mut collected = vec![];
             let mut me = Self::default();
 
