@@ -1,5 +1,9 @@
 use std::{fmt, io::Write};
-use token::{Streaming, UniformToken};
+use token::{IsComplete, Token, TokenKind};
+
+pub trait Format: IsComplete + fmt::Debug + fmt::Display {}
+
+impl<T> Format for T where T: IsComplete + fmt::Debug + fmt::Display {}
 
 pub struct Formatter<W> {
     output: W,
@@ -48,9 +52,27 @@ where
         }
     }
 
-    pub fn write_token<V>(&mut self, token: UniformToken<Streaming<V>>) -> std::io::Result<()>
+    pub fn write_token<K>(&mut self, token: Token<K>) -> std::io::Result<()>
     where
-        Streaming<V>: fmt::Debug + fmt::Display,
+        K: TokenKind,
+        K::DeclarationStart: Format,
+        K::DeclarationEncoding: Format,
+        K::DeclarationStandalone: Format,
+        K::ElementOpenStart: Format,
+        K::ElementClose: Format,
+        K::AttributeStart: Format,
+        K::AttributeValueLiteral: Format,
+        K::AttributeValueReferenceNamed: Format,
+        K::AttributeValueReferenceDecimal: Format,
+        K::AttributeValueReferenceHex: Format,
+        K::CharData: Format,
+        K::CData: Format,
+        K::ReferenceNamed: Format,
+        K::ReferenceDecimal: Format,
+        K::ReferenceHex: Format,
+        K::ProcessingInstructionStart: Format,
+        K::ProcessingInstructionValue: Format,
+        K::Comment: Format,
     {
         use token::Token::*;
 
@@ -131,7 +153,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use token::{Streaming::*, Token::*};
+    use token::{Streaming, Streaming::*, Token::*, UniformToken};
 
     use super::*;
 
@@ -142,9 +164,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(DeclarationStart(Partial("1.")))?;
-        f.write_token(DeclarationStart(Partial("23")))?;
-        f.write_token(DeclarationStart(Complete("45")))?;
+        f.write_token_str(DeclarationStart(Partial("1.")))?;
+        f.write_token_str(DeclarationStart(Partial("23")))?;
+        f.write_token_str(DeclarationStart(Complete("45")))?;
 
         assert_eq!(out, br#"<?xml version="1.2345""#);
 
@@ -156,9 +178,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(DeclarationEncoding(Partial("U")))?;
-        f.write_token(DeclarationEncoding(Partial("TF-")))?;
-        f.write_token(DeclarationEncoding(Complete("8")))?;
+        f.write_token_str(DeclarationEncoding(Partial("U")))?;
+        f.write_token_str(DeclarationEncoding(Partial("TF-")))?;
+        f.write_token_str(DeclarationEncoding(Complete("8")))?;
 
         assert_eq!(out, br#" encoding="UTF-8""#);
 
@@ -170,9 +192,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(DeclarationStandalone(Partial("y")))?;
-        f.write_token(DeclarationStandalone(Partial("e")))?;
-        f.write_token(DeclarationStandalone(Complete("s")))?;
+        f.write_token_str(DeclarationStandalone(Partial("y")))?;
+        f.write_token_str(DeclarationStandalone(Partial("e")))?;
+        f.write_token_str(DeclarationStandalone(Complete("s")))?;
 
         assert_eq!(out, br#" standalone="yes""#);
 
@@ -184,9 +206,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ElementOpenStart(Partial("ab")))?;
-        f.write_token(ElementOpenStart(Partial("cd")))?;
-        f.write_token(ElementOpenStart(Complete("ef")))?;
+        f.write_token_str(ElementOpenStart(Partial("ab")))?;
+        f.write_token_str(ElementOpenStart(Partial("cd")))?;
+        f.write_token_str(ElementOpenStart(Complete("ef")))?;
 
         assert_eq!(out, br#"<abcdef"#);
 
@@ -198,9 +220,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ElementClose(Partial("ab")))?;
-        f.write_token(ElementClose(Partial("cd")))?;
-        f.write_token(ElementClose(Complete("ef")))?;
+        f.write_token_str(ElementClose(Partial("ab")))?;
+        f.write_token_str(ElementClose(Partial("cd")))?;
+        f.write_token_str(ElementClose(Complete("ef")))?;
 
         assert_eq!(out, br#"</abcdef>"#);
 
@@ -212,9 +234,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeStart(Partial("ab")))?;
-        f.write_token(AttributeStart(Partial("cd")))?;
-        f.write_token(AttributeStart(Complete("ef")))?;
+        f.write_token_str(AttributeStart(Partial("ab")))?;
+        f.write_token_str(AttributeStart(Partial("cd")))?;
+        f.write_token_str(AttributeStart(Complete("ef")))?;
 
         assert_eq!(out, br#" abcdef=""#);
 
@@ -226,9 +248,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeValueLiteral(Partial("ab")))?;
-        f.write_token(AttributeValueLiteral(Partial("cd")))?;
-        f.write_token(AttributeValueLiteral(Complete("ef")))?;
+        f.write_token_str(AttributeValueLiteral(Partial("ab")))?;
+        f.write_token_str(AttributeValueLiteral(Partial("cd")))?;
+        f.write_token_str(AttributeValueLiteral(Complete("ef")))?;
 
         assert_eq!(out, br#"abcdef"#);
 
@@ -240,9 +262,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeValueReferenceNamed(Partial("ab")))?;
-        f.write_token(AttributeValueReferenceNamed(Partial("cd")))?;
-        f.write_token(AttributeValueReferenceNamed(Complete("ef")))?;
+        f.write_token_str(AttributeValueReferenceNamed(Partial("ab")))?;
+        f.write_token_str(AttributeValueReferenceNamed(Partial("cd")))?;
+        f.write_token_str(AttributeValueReferenceNamed(Complete("ef")))?;
 
         assert_eq!(out, br#"&abcdef;"#);
 
@@ -254,9 +276,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeValueReferenceDecimal(Partial("12")))?;
-        f.write_token(AttributeValueReferenceDecimal(Partial("34")))?;
-        f.write_token(AttributeValueReferenceDecimal(Complete("56")))?;
+        f.write_token_str(AttributeValueReferenceDecimal(Partial("12")))?;
+        f.write_token_str(AttributeValueReferenceDecimal(Partial("34")))?;
+        f.write_token_str(AttributeValueReferenceDecimal(Complete("56")))?;
 
         assert_eq!(out, br#"&#123456;"#);
 
@@ -268,9 +290,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(AttributeValueReferenceHex(Partial("AB")))?;
-        f.write_token(AttributeValueReferenceHex(Partial("CD")))?;
-        f.write_token(AttributeValueReferenceHex(Complete("EF")))?;
+        f.write_token_str(AttributeValueReferenceHex(Partial("AB")))?;
+        f.write_token_str(AttributeValueReferenceHex(Partial("CD")))?;
+        f.write_token_str(AttributeValueReferenceHex(Complete("EF")))?;
 
         assert_eq!(out, br#"&#xABCDEF;"#);
 
@@ -282,9 +304,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ReferenceNamed(Partial("ab")))?;
-        f.write_token(ReferenceNamed(Partial("cd")))?;
-        f.write_token(ReferenceNamed(Complete("ef")))?;
+        f.write_token_str(ReferenceNamed(Partial("ab")))?;
+        f.write_token_str(ReferenceNamed(Partial("cd")))?;
+        f.write_token_str(ReferenceNamed(Complete("ef")))?;
 
         assert_eq!(out, br#"&abcdef;"#);
 
@@ -296,9 +318,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ReferenceDecimal(Partial("12")))?;
-        f.write_token(ReferenceDecimal(Partial("34")))?;
-        f.write_token(ReferenceDecimal(Complete("56")))?;
+        f.write_token_str(ReferenceDecimal(Partial("12")))?;
+        f.write_token_str(ReferenceDecimal(Partial("34")))?;
+        f.write_token_str(ReferenceDecimal(Complete("56")))?;
 
         assert_eq!(out, br#"&#123456;"#);
 
@@ -310,9 +332,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ReferenceHex(Partial("AB")))?;
-        f.write_token(ReferenceHex(Partial("CD")))?;
-        f.write_token(ReferenceHex(Complete("EF")))?;
+        f.write_token_str(ReferenceHex(Partial("AB")))?;
+        f.write_token_str(ReferenceHex(Partial("CD")))?;
+        f.write_token_str(ReferenceHex(Complete("EF")))?;
 
         assert_eq!(out, br#"&#xABCDEF;"#);
 
@@ -324,9 +346,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(CData(Partial("ab")))?;
-        f.write_token(CData(Partial("cd")))?;
-        f.write_token(CData(Complete("ef")))?;
+        f.write_token_str(CData(Partial("ab")))?;
+        f.write_token_str(CData(Partial("cd")))?;
+        f.write_token_str(CData(Complete("ef")))?;
 
         assert_eq!(out, br#"<![CDATA[abcdef]]>"#);
 
@@ -338,9 +360,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ProcessingInstructionStart(Partial("ab")))?;
-        f.write_token(ProcessingInstructionStart(Partial("cd")))?;
-        f.write_token(ProcessingInstructionStart(Complete("ef")))?;
+        f.write_token_str(ProcessingInstructionStart(Partial("ab")))?;
+        f.write_token_str(ProcessingInstructionStart(Partial("cd")))?;
+        f.write_token_str(ProcessingInstructionStart(Complete("ef")))?;
 
         assert_eq!(out, br#"<?abcdef"#);
 
@@ -352,9 +374,9 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(ProcessingInstructionValue(Partial("ab")))?;
-        f.write_token(ProcessingInstructionValue(Partial("cd")))?;
-        f.write_token(ProcessingInstructionValue(Complete("ef")))?;
+        f.write_token_str(ProcessingInstructionValue(Partial("ab")))?;
+        f.write_token_str(ProcessingInstructionValue(Partial("cd")))?;
+        f.write_token_str(ProcessingInstructionValue(Complete("ef")))?;
 
         assert_eq!(out, br#"abcdef"#);
 
@@ -366,12 +388,24 @@ mod test {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
 
-        f.write_token(Comment(Partial("ab")))?;
-        f.write_token(Comment(Partial("cd")))?;
-        f.write_token(Comment(Complete("ef")))?;
+        f.write_token_str(Comment(Partial("ab")))?;
+        f.write_token_str(Comment(Partial("cd")))?;
+        f.write_token_str(Comment(Complete("ef")))?;
 
         assert_eq!(out, br#"<!--abcdef-->"#);
 
         Ok(())
+    }
+
+    impl<W> Formatter<W>
+    where
+        W: Write,
+    {
+        pub fn write_token_str(
+            &mut self,
+            token: UniformToken<Streaming<&str>>,
+        ) -> std::io::Result<()> {
+            self.write_token(token)
+        }
     }
 }

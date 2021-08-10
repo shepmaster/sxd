@@ -3,8 +3,8 @@
 
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
-use std::{io::Read, mem, str};
-use token::{Streaming, Token, UniformToken};
+use std::{io::Read, marker::PhantomData, mem, str};
+use token::{IsComplete, Streaming, Token, TokenKind, UniformToken};
 
 #[macro_use]
 mod macros;
@@ -695,6 +695,10 @@ impl CoreParser {
 
     pub fn as_str(&self) -> &str {
         self.buffer.as_str()
+    }
+
+    pub fn exchange(&self, idx: usize) -> &str {
+        &self.as_str()[..idx]
     }
 
     pub fn refill_using<E>(
@@ -1591,14 +1595,18 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
+    // This method (and similar methods that return `usize` or other
+    // non-reference types) are a workaround for the current
+    // limitations of the borrow checker. If Polonius is ever merged,
+    // this can be simplified.
+    pub fn next_index(&mut self) -> Option<Result<IndexToken>> {
         let Self {
             parser,
             source,
             exhausted,
         } = self;
 
-        let v = loop {
+        loop {
             match parser.next() {
                 None => { /* Get more data */ }
                 Some(Err(e)) if e.needs_more_input() => { /* Get more data */ }
@@ -1623,101 +1631,154 @@ where
                 Ok(Err(e)) => panic!("Report this: {}", e),
                 Err(e) => return Some(Err(e)),
             }
-        };
+        }
+    }
 
-        v.map(move |t| t.map(move |t| t.map(move |t| t.map(move |t| &parser.as_str()[..t]))))
+    pub fn next(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
+        let v = self.next_index();
+        v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.parser.exchange(idx)))))
+    }
+}
+
+macro_rules! fuse_invoke {
+    ($inner_macro:ident) => {
+        $inner_macro! {
+            fuse DeclarationStart,
+            fuse DeclarationEncoding,
+            fuse DeclarationStandalone,
+            pass DeclarationClose,
+            fuse ElementOpenStart,
+            pass ElementOpenEnd,
+            pass ElementSelfClose,
+            fuse ElementClose,
+            fuse AttributeStart,
+            stream AttributeValueLiteral,
+            stream AttributeValueReferenceNamed,
+            fuse AttributeValueReferenceDecimal,
+            fuse AttributeValueReferenceHex,
+            pass AttributeValueEnd,
+            stream CharData,
+            stream CData,
+            stream ReferenceNamed,
+            fuse ReferenceDecimal,
+            fuse ReferenceHex,
+            fuse ProcessingInstructionStart,
+            stream ProcessingInstructionValue,
+            pass ProcessingInstructionEnd,
+            stream Comment,
+        }
+    };
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum FusedIndex {
+    Buffered,
+    Direct(usize),
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct FusedIndexKind(());
+
+macro_rules! fused_index_kind {
+    ($($tt:tt $name:ident,)*) => { $(fused_index_kind! { @type $tt $name })* };
+
+    (@type pass $name:ident) => { };
+    (@type fuse $name:ident) => { type $name = FusedIndex; };
+    (@type stream $name:ident) => { type $name = Streaming<usize>; };
+}
+
+impl TokenKind for FusedIndexKind {
+    fuse_invoke!(fused_index_kind);
+}
+
+pub type FusedIndexToken = Token<FusedIndexKind>;
+
+#[derive(Debug, Copy, Clone)]
+pub struct FusedKind<'a>(PhantomData<&'a str>);
+
+macro_rules! fused_kind {
+    ($($tt:tt $name:ident,)*) => { $(fused_kind! { @type $tt $name })* };
+
+    (@type pass $name:ident) => { };
+    (@type fuse $name:ident) => { type $name = &'a str; };
+    (@type stream $name:ident) => { type $name = Streaming<&'a str>; };
+}
+
+impl<'a> TokenKind for FusedKind<'a> {
+    fuse_invoke!(fused_kind);
+}
+
+pub type FusedToken<'a> = Token<FusedKind<'a>>;
+
+trait Exchange {
+    fn exchange(&self, idx: usize) -> &str;
+}
+
+impl Exchange for CoreParser {
+    fn exchange(&self, idx: usize) -> &str {
+        Self::exchange(self, idx)
     }
 }
 
 #[derive(Debug, Default)]
 struct FuseCore {
-    current: Option<UniformToken<String>>,
+    buffer: String,
+    current: Option<UniformToken<()>>,
 }
 
 impl FuseCore {
-    fn push(&mut self, t: UniformToken<Streaming<&str>>) -> Option<UniformToken<String>> {
-        use {Streaming::*, Token::*};
+    fn push(&mut self, t: IndexToken, parser: &impl Exchange) -> Option<FusedIndexToken> {
+        use {FusedIndex::*, Streaming::*, Token::*};
 
-        let Self { current } = self;
+        let Self { buffer, current } = self;
 
-        macro_rules! fuse_tokens {
-            ($($vname:ident $(($field:ident))?,)*) => {
+        macro_rules! push_match {
+            ($($tt:tt $name:ident,)*) => {
                 match t {
-                    $(
-                        fuse_tokens!(@pat $vname $($field)?) => fuse_tokens!(@arm $vname $($field)?),
-                    )*
+                    $( push_match!(@pat $tt $name s) => push_match!(@arm $tt $name s), )*
                 }
             };
 
-            (@pat $vname:ident $field:ident) => { $vname($field) };
-            (@arm $vname:ident $field:ident) => {
-                match $field {
-                    Partial(x) => {
-                        match current {
-                            Some($vname(s)) => {
-                                s.push_str(x);
-                                None
-                            },
-                            Some(other) => unreachable!("Was processing {:?} but didn't see complete before seeing {:?}", other, $field),
-                            None => {
-                                *current = Some($vname(x.to_string()));
-                                None
-                            }
-                        }
-                    },
-                    Complete(x) => {
-                        match current.take() {
-                            Some($vname(mut s)) => {
-                                s.push_str(x);
-                                Some($vname(s))
-                            }
-                            Some(other) => unreachable!("Was processing {:?} but didn't see complete before seeing {:?}", other, $field),
-                            None => Some($vname(x.to_string())),
-                        }
-                    },
+            (@pat pass $name:ident $s:ident) => { $name };
+            (@arm pass $name:ident $s:ident) => { Some($name) };
+
+            (@pat fuse $name:ident $s:ident) => { $name($s) };
+            (@arm fuse $name:ident $s:ident) => {
+                match ($s, *current) {
+                    (Partial(v), None) => {
+                        *current = Some($name(()));
+                        buffer.clear();
+                        buffer.push_str(parser.exchange(v));
+                        None
+                    }
+                    (Partial(v), Some($name(()))) => {
+                        buffer.push_str(parser.exchange(v));
+                        None
+                    }
+                    (Complete(v), None) => Some($name(Direct(v))),
+                    (Complete(v), Some($name(()))) => {
+                        *current = None;
+                        buffer.push_str(parser.exchange(v));
+                        Some($name(Buffered))
+                    }
+                    (p, Some(c)) => unreachable!("While processing {:?}, had a cached {:?}", p, c),
                 }
             };
 
-            (@pat $vname:ident) => { $vname };
-            (@arm $vname:ident) => { Some($vname) };
+            (@pat stream $name:ident $s:ident) => { $name($s) };
+            (@arm stream $name:ident $s:ident) => {
+                match ($s, current) {
+                    (v, None) => Some($name(v)),
+                    (p, Some(c)) => unreachable!("While processing {:?}, had a cached {:?}", p, c),
+                }
+            };
         }
 
-        fuse_tokens! {
-            DeclarationStart(val),
-            DeclarationEncoding(val),
-            DeclarationStandalone(val),
-            DeclarationClose,
-
-            ElementOpenStart(val),
-            ElementOpenEnd,
-            ElementSelfClose,
-            ElementClose(val),
-
-            AttributeStart(val),
-            AttributeValueLiteral(val),
-            AttributeValueReferenceNamed(val),
-            AttributeValueReferenceDecimal(val),
-            AttributeValueReferenceHex(val),
-            AttributeValueEnd,
-
-            CharData(val),
-            CData(val),
-
-            ReferenceNamed(val),
-            ReferenceDecimal(val),
-            ReferenceHex(val),
-
-            ProcessingInstructionStart(val),
-            ProcessingInstructionValue(val),
-            ProcessingInstructionEnd,
-
-            Comment(val),
-        }
+        fuse_invoke!(push_match)
     }
 
-    fn finish(&mut self) -> Result<Option<UniformToken<String>>, FuseError> {
+    fn finish(&mut self) -> Result<Option<FusedIndexToken>, FuseError> {
         match self.current.take() {
-            Some(t @ Token::CharData(_)) => Ok(Some(t)),
             Some(_) => Incomplete.fail(),
             None => Ok(None),
         }
@@ -1741,12 +1802,12 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<UniformToken<String>, FuseError>> {
+    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken, FuseError>> {
         let Self { inner, core } = self;
-        while let Some(t) = inner.next() {
+        while let Some(t) = inner.next_index() {
             match t {
                 Ok(t) => {
-                    if let Some(t) = core.push(t) {
+                    if let Some(t) = core.push(t, &inner.parser) {
                         return Some(Ok(t));
                     }
                 }
@@ -1758,6 +1819,39 @@ where
             Ok(v) => v.map(Ok),
             Err(e) => return Some(Err(e)),
         }
+    }
+
+    pub fn next(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
+        let v = self.next_index();
+        v.map(move |r| r.map(move |t| self.exchange(t)))
+    }
+
+    pub fn exchange(&self, token: FusedIndexToken) -> FusedToken<'_> {
+        use {FusedIndex::*, Token::*};
+
+        macro_rules! exchange_match {
+            ($($tt:tt $name:ident,)*) => {
+                match token {
+                    $( exchange_match!(@pat $tt $name s) => exchange_match!(@arm $tt $name s), )*
+                }
+            };
+
+            (@pat pass $name:ident $s:ident) => { $name };
+            (@arm pass $name:ident $s:ident) => { $name };
+
+            (@pat fuse $name:ident $s:ident) => { $name($s) };
+            (@arm fuse $name:ident $s:ident) => {
+                match $s {
+                    Buffered => $name(&*self.core.buffer),
+                    Direct(idx) => $name(self.inner.parser.exchange(idx)),
+                }
+            };
+
+            (@pat stream $name:ident $s:ident) => { $name($s) };
+            (@arm stream $name:ident $s:ident) => { $name($s.map(|i| self.inner.parser.exchange(i))) };
+        }
+
+        fuse_invoke!(exchange_match)
     }
 }
 
@@ -2638,9 +2732,11 @@ mod test {
             assert_eq!(
                 tokens,
                 [
-                    UniformToken::<&str>::ElementOpenStart("aaaaaaaaaa"),
+                    FusedToken::ElementOpenStart("aaaaaaaaaa"),
                     AttributeStart("bbbbbbbbbb"),
-                    AttributeValueLiteral("ccc"),
+                    AttributeValueLiteral(Partial("c")),
+                    AttributeValueLiteral(Partial("c")),
+                    AttributeValueLiteral(Complete("c")),
                     AttributeValueEnd,
                     ElementSelfClose,
                 ],
@@ -2653,7 +2749,7 @@ mod test {
         fn unfinished_character_data_is_returned() -> Result {
             let tokens = FuseCore::fuse_all(vec![CharData(Partial("a"))])?;
 
-            assert_eq!(tokens, [UniformToken::<&str>::CharData("a"),],);
+            assert_eq!(tokens, [FusedToken::CharData(Partial("a"))]);
 
             Ok(())
         }
@@ -2681,18 +2777,103 @@ mod test {
         }
     }
 
+    #[derive(Debug, Copy, Clone)]
+    struct FusedOwnedKind(());
+
+    macro_rules! fused_owned_kind {
+        ($($tt:tt $name:ident,)*) => { $(fused_owned_kind! { @type $tt $name })* };
+
+        (@type pass $name:ident) => { };
+        (@type fuse $name:ident) => { type $name = String; };
+        (@type stream $name:ident) => { type $name = Streaming<String>; };
+    }
+
+    impl TokenKind for FusedOwnedKind {
+        fuse_invoke!(fused_owned_kind);
+    }
+
+    type FusedOwnedToken = Token<FusedOwnedKind>;
+
+    #[ext]
+    impl FusedOwnedToken {
+        fn from_index(token: FusedIndexToken, buffer: &str, source: &impl Exchange) -> Self {
+            use FusedIndex::*;
+
+            macro_rules! fuse_all_match {
+                ($($tt:tt $name:ident,)*) => {
+                    match token {
+                        $( fuse_all_match!(@pat $tt $name s) => fuse_all_match!(@arm $tt $name s), )*
+                    }
+                };
+
+                (@pat pass $name:ident $s:ident) => { $name };
+                (@arm pass $name:ident $s:ident) => { $name };
+
+                (@pat fuse $name:ident $s:ident) => { $name($s) };
+                (@arm fuse $name:ident $s:ident) => {
+                    match $s {
+                        Buffered => $name(buffer.to_string()),
+                        Direct(idx) => $name(source.exchange(idx).to_string()),
+                    }
+                };
+
+                (@pat stream $name:ident $s:ident) => { $name($s) };
+                (@arm stream $name:ident $s:ident) => { $name($s.map(|i| source.exchange(i).to_string())) };
+            }
+
+            fuse_invoke!(fuse_all_match)
+        }
+    }
+
+    struct BufferedParser<'a>(Vec<&'a str>);
+
+    impl<'a> BufferedParser<'a> {
+        fn new(
+            tokens: impl IntoIterator<Item = UniformToken<Streaming<&'a str>>>,
+        ) -> (Self, Vec<IndexToken>) {
+            let mut buffered = vec![];
+            let mut index_tokens = vec![];
+
+            for (i, t) in tokens.into_iter().enumerate() {
+                let t = t.map(|s| {
+                    s.map(|v| {
+                        buffered.push(v);
+                        i
+                    })
+                });
+                index_tokens.push(t);
+            }
+
+            (BufferedParser(buffered), index_tokens)
+        }
+    }
+
+    impl Exchange for BufferedParser<'_> {
+        fn exchange(&self, idx: usize) -> &str {
+            self.0[idx]
+        }
+    }
+
     impl FuseCore {
         fn fuse_all<'a>(
             tokens: impl IntoIterator<Item = UniformToken<Streaming<&'a str>>>,
-        ) -> super::Result<Vec<UniformToken<String>>, super::FuseError> {
+        ) -> super::Result<Vec<FusedOwnedToken>, super::FuseError> {
+            let (parser, index_tokens) = BufferedParser::new(tokens);
+
             let mut collected = vec![];
             let mut me = Self::default();
 
-            for token in tokens {
-                collected.extend(me.push(token));
+            for token in index_tokens {
+                collected.extend({
+                    let idx = me.push(token, &parser);
+                    idx.map(|i| FusedOwnedToken::from_index(i, &me.buffer, &parser))
+                });
             }
 
-            collected.extend(me.finish()?);
+            collected.extend({
+                let idx = me.finish()?;
+                idx.map(|i| FusedOwnedToken::from_index(i, &me.buffer, &parser))
+            });
 
             Ok(collected)
         }

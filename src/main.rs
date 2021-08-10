@@ -57,9 +57,6 @@ fn stream_output(parser: Parser<impl Read>, out: impl Write) -> Result<usize> {
         let token = token?;
         count += 1;
 
-        // FIXME: remove the map
-        let token = token.map(|t| token::Streaming::Complete(t));
-
         fmt.write_token(token)?;
     }
 

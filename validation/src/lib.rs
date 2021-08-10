@@ -1,10 +1,29 @@
 use once_cell::sync::Lazy;
-use pull_parser::{Fuse, Parser, XmlCharExt, XmlStrExt};
+use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{collections::HashSet, io::Read};
 use string_slab::{CheckedArena, CheckedKey};
-use token::UniformToken;
+use token::{Token, TokenKind};
+
+trait Fused {
+    fn as_fused_str(&self) -> &str;
+}
+
+impl<F> Fused for &'_ F
+where
+    F: Fused + ?Sized,
+{
+    fn as_fused_str(&self) -> &str {
+        F::as_fused_str(self)
+    }
+}
+
+impl Fused for str {
+    fn as_fused_str(&self) -> &str {
+        self
+    }
+}
 
 #[derive(Debug, Default)]
 struct ValidatorCore {
@@ -16,9 +35,21 @@ struct ValidatorCore {
 }
 
 impl ValidatorCore {
-    fn push<S>(&mut self, token: UniformToken<S>) -> Result<UniformToken<S>>
+    fn push<K>(&mut self, token: Token<K>) -> Result<()>
     where
-        S: AsRef<str>,
+        K: TokenKind,
+        K::DeclarationStart: Fused,
+        K::ElementOpenStart: Fused,
+        K::ElementClose: Fused,
+        K::AttributeStart: Fused,
+        K::AttributeValueReferenceDecimal: Fused,
+        K::AttributeValueReferenceHex: Fused,
+        K::ReferenceDecimal: Fused,
+        K::ReferenceHex: Fused,
+        K::ProcessingInstructionStart: Fused,
+        K::CharData: AsRef<str>,
+        K::CData: AsRef<str>,
+        K::ReferenceNamed: AsRef<str>,
     {
         use token::Token::*;
 
@@ -52,7 +83,7 @@ impl ValidatorCore {
                 static VALID_VERSION_STRING: Lazy<Regex> =
                     Lazy::new(|| Regex::new(r#"^1\.[0-9]+$"#).unwrap());
 
-                let v = v.as_ref();
+                let v = v.as_fused_str();
 
                 ensure!(
                     VALID_VERSION_STRING.is_match(v),
@@ -61,7 +92,7 @@ impl ValidatorCore {
             }
 
             ElementOpenStart(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
 
                 ensure!(!v.is_empty(), ElementNameEmpty);
 
@@ -77,7 +108,7 @@ impl ValidatorCore {
                 element_stack.pop().context(ElementSelfClosedWithoutOpen)?;
             }
             ElementClose(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 let v = arena.intern(v);
                 let name = element_stack.pop().context(ElementClosedWithoutOpen)?;
                 ensure!(
@@ -90,7 +121,7 @@ impl ValidatorCore {
             }
 
             AttributeStart(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
 
                 ensure!(!v.is_empty(), AttributeNameEmpty);
 
@@ -100,12 +131,12 @@ impl ValidatorCore {
                 )
             }
             AttributeValueReferenceDecimal(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
                 reference_value(v, 10).context(InvalidAttributeValueReferenceDecimal)?;
             }
             AttributeValueReferenceHex(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
                 reference_value(v, 16).context(InvalidAttributeValueReferenceHex)?;
             }
@@ -130,7 +161,7 @@ impl ValidatorCore {
                 );
             }
             ReferenceDecimal(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 ensure!(
                     !element_stack.is_empty(),
                     ReferenceDecimalOutsideOfElement { text: v }
@@ -139,7 +170,7 @@ impl ValidatorCore {
                 reference_value(v, 10).context(InvalidReferenceDecimal)?;
             }
             ReferenceHex(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 ensure!(
                     !element_stack.is_empty(),
                     ReferenceHexOutsideOfElement { text: v }
@@ -149,7 +180,7 @@ impl ValidatorCore {
             }
 
             ProcessingInstructionStart(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 ensure!(!v.is_empty(), ProcessingInstructionNameEmpty);
                 ensure!(
                     !v.eq_ignore_ascii_case("xml"),
@@ -162,7 +193,7 @@ impl ValidatorCore {
 
         *count += 1;
 
-        Ok(token)
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -227,17 +258,30 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<UniformToken<String>>> {
+    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken>> {
         let Self { parser, core } = self;
 
-        match parser.next() {
+        match parser.next_index() {
             None => match core.finish() {
                 Ok(()) => None,
                 Err(e) => Some(Err(e)),
             },
-            Some(Ok(v)) => Some(core.push(v)),
-            Some(e) => Some(e.map_err(Into::into)),
+            Some(Ok(v)) => {
+                let v2 = parser.exchange(v);
+
+                match core.push(v2) {
+                    Ok(()) => Some(Ok(v)),
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            Some(Err(e)) => Some(Err(e.into())),
         }
+    }
+
+    pub fn next(&mut self) -> Option<Result<FusedToken<'_>>> {
+        let v = self.next_index();
+        let parser = &self.parser;
+        v.map(|r| r.map(|t| parser.exchange(t)))
     }
 }
 
@@ -319,7 +363,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[cfg(test)]
 mod test {
     use super::*;
-    use token::Token::*;
+    use token::{Token::*, UniformToken};
 
     macro_rules! assert_ok {
         ($e:expr) => {
@@ -578,10 +622,9 @@ mod test {
     }
 
     impl ValidatorCore {
-        fn validate_all<S>(tokens: impl IntoIterator<Item = UniformToken<S>>) -> super::Result<()>
-        where
-            S: AsRef<str>,
-        {
+        fn validate_all<'a>(
+            tokens: impl IntoIterator<Item = UniformToken<&'a str>>,
+        ) -> super::Result<()> {
             let mut me = Self::default();
             for token in tokens {
                 me.push(token)?;

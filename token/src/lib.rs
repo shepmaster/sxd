@@ -4,6 +4,27 @@ include!(concat!(env!("OUT_DIR"), "/generated_token.rs"));
 
 pub type UniformToken<T> = Token<UniformKind<T>>;
 
+pub trait IsComplete {
+    fn is_complete(&self) -> bool;
+}
+
+impl<T> IsComplete for &'_ T
+where
+    T: ?Sized + IsComplete,
+{
+    #[inline]
+    fn is_complete(&self) -> bool {
+        T::is_complete(self)
+    }
+}
+
+impl IsComplete for str {
+    #[inline]
+    fn is_complete(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq)]
 pub enum Streaming<T> {
     Partial(T),
@@ -11,11 +32,6 @@ pub enum Streaming<T> {
 }
 
 impl<T> Streaming<T> {
-    #[inline]
-    pub fn is_complete(&self) -> bool {
-        matches!(self, Streaming::Complete(_))
-    }
-
     #[inline]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Streaming<U> {
         use Streaming::*;
@@ -34,6 +50,25 @@ impl<T> Streaming<T> {
             Partial(a) => a,
             Complete(a) => a,
         }
+    }
+}
+
+impl<T> IsComplete for Streaming<T> {
+    #[inline]
+    fn is_complete(&self) -> bool {
+        matches!(self, Streaming::Complete(_))
+    }
+}
+
+impl<T> AsRef<T> for Streaming<T> {
+    fn as_ref(&self) -> &T {
+        self.unify()
+    }
+}
+
+impl AsRef<str> for Streaming<&str> {
+    fn as_ref(&self) -> &str {
+        self.unify()
     }
 }
 
