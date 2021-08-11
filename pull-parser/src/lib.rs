@@ -447,7 +447,7 @@ impl u8 {
 #[ext(pub XmlCharExt)]
 impl char {
     #[inline]
-    fn is_allowed_xml_char(self) -> bool {
+    fn is_allowed_xml_char(&self) -> bool {
         // Sorted by how common each case is, using early exits
         match self {
             '\u{20}'..='\u{FF}' => true,
@@ -458,7 +458,7 @@ impl char {
     }
 
     #[inline]
-    fn is_name_start_char_ascii(self) -> bool {
+    fn is_name_start_char_ascii(&self) -> bool {
         match self {
             ':' | 'A'..='Z' | '_' | 'a'..='z' => true,
             _ => false,
@@ -466,8 +466,8 @@ impl char {
     }
 
     #[inline]
-    fn is_name_start_char_non_ascii(self) -> bool {
-        if matches!(self, '\u{C0}'..='\u{2FF}') && self != '\u{D7}' && self != '\u{F7}' {
+    fn is_name_start_char_non_ascii(&self) -> bool {
+        if matches!(*self, '\u{C0}'..='\u{2FF}') && *self != '\u{D7}' && *self != '\u{F7}' {
             return true;
         }
         match self {
@@ -485,7 +485,7 @@ impl char {
     }
 
     #[inline]
-    fn is_name_start_char(self) -> bool {
+    fn is_name_start_char(&self) -> bool {
         if self.is_name_start_char_ascii() {
             return true;
         }
@@ -615,14 +615,14 @@ enum Quote {
 }
 
 impl Quote {
-    fn to_char(&self) -> char {
+    fn to_char(self) -> char {
         match self {
             Self::Single => '\'',
             Self::Double => '"',
         }
     }
 
-    fn to_ascii_char(&self) -> u8 {
+    fn to_ascii_char(self) -> u8 {
         match self {
             Self::Single => b'\'',
             Self::Double => b'"',
