@@ -448,77 +448,58 @@ impl u8 {
 impl char {
     #[inline]
     fn is_allowed_xml_char(&self) -> bool {
-        // Sorted by how common each case is, using early exits
-        match self {
-            '\u{20}'..='\u{FF}' => true,
-            '\u{9}' | '\u{A}' | '\u{D}' => true,
-            '\u{100}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}' => true,
-            _ => false,
-        }
+        // Sorted by how common each case is which noticeably impacts
+        // performance
+        matches!(
+            self,
+                '\u{20}'..='\u{FF}'
+                | '\u{9}'
+                | '\u{A}'
+                | '\u{D}'
+                | '\u{100}'..='\u{D7FF}'
+                | '\u{E000}'..='\u{FFFD}'
+                | '\u{10000}'..='\u{10FFFF}'
+        )
     }
 
     #[inline]
     fn is_name_start_char_ascii(&self) -> bool {
-        match self {
-            ':' | 'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
+        matches!(self, ':' | 'A'..='Z' | '_' | 'a'..='z')
     }
 
     #[inline]
     fn is_name_start_char_non_ascii(&self) -> bool {
-        if matches!(*self, '\u{C0}'..='\u{2FF}') && *self != '\u{D7}' && *self != '\u{F7}' {
-            return true;
-        }
-        match self {
-            '\u{370}'..='\u{37D}'
-            | '\u{37F}'..='\u{1FFF}'
-            | '\u{200C}'..='\u{200D}'
-            | '\u{2070}'..='\u{218F}'
-            | '\u{2C00}'..='\u{2FEF}'
-            | '\u{3001}'..='\u{D7FF}'
-            | '\u{F900}'..='\u{FDCF}'
-            | '\u{FDF0}'..='\u{FFFD}'
-            | '\u{10000}'..='\u{EFFFF}' => true,
-            _ => false,
-        }
+        (matches!(self, '\u{C0}'..='\u{2FF}') && !matches!(self, '\u{D7}' | '\u{F7}'))
+            || matches!(
+                self,
+                '\u{370}'..='\u{37D}'
+                    | '\u{37F}'..='\u{1FFF}'
+                    | '\u{200C}'..='\u{200D}'
+                    | '\u{2070}'..='\u{218F}'
+                    | '\u{2C00}'..='\u{2FEF}'
+                    | '\u{3001}'..='\u{D7FF}'
+                    | '\u{F900}'..='\u{FDCF}'
+                    | '\u{FDF0}'..='\u{FFFD}'
+                    | '\u{10000}'..='\u{EFFFF}'
+            )
     }
 
     #[inline]
     fn is_name_start_char(&self) -> bool {
-        if self.is_name_start_char_ascii() {
-            return true;
-        }
-
-        self.is_name_start_char_non_ascii()
+        self.is_name_start_char_ascii() || self.is_name_start_char_non_ascii()
     }
 
     #[inline]
     fn is_name_non_start_char_ascii(&self) -> bool {
-        match self {
-            '-' | '.' | '0'..='9' => true,
-            _ => false,
-        }
+        matches!(self, '-' | '.' | '0'..='9')
     }
 
     #[inline]
     fn is_name_char(&self) -> bool {
-        if self.is_name_start_char_ascii() {
-            return true;
-        }
-
-        if self.is_name_non_start_char_ascii() {
-            return true;
-        }
-
-        if self.is_name_start_char_non_ascii() {
-            return true;
-        }
-
-        match self {
-            '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}' => true,
-            _ => false,
-        }
+        self.is_name_start_char_ascii()
+            || self.is_name_non_start_char_ascii()
+            || self.is_name_start_char_non_ascii()
+            || matches!(self, '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
     }
 }
 
