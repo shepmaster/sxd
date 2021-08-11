@@ -1,0 +1,101 @@
+name: Continuous Integration
+on: [push]
+
+env:
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  primary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+          profile: minimal
+          default: true
+
+      - name: Run tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all
+
+      - name: Lint code
+        if: ${{ always() }}
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all --all-targets
+
+      - name: Ensure code is formatted
+        if: ${{ always() }}
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  comparison:
+    runs-on: ubuntu-latest
+
+    env:
+      LLVM_CONFIG: llvm-config-12
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+          profile: minimal
+          default: true
+
+      - name: Lint code
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --manifest-path=comparison/Cargo.toml --all --all-targets
+
+      - name: Ensure code is formatted
+        if: ${{ always() }}
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --manifest-path=comparison/Cargo.toml --all -- --check
+
+  fuzz:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+          profile: minimal
+          default: true
+
+      - name: Lint code
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --manifest-path=comparison/fuzz/Cargo.toml --all --all-targets
+
+      - name: Ensure code is formatted
+        if: ${{ always() }}
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --manifest-path=comparison/fuzz/Cargo.toml --all -- --check
