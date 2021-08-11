@@ -53,7 +53,7 @@ fn stream_output(parser: Parser<impl Read>, out: impl Write) -> Result<usize> {
     let mut validator = Validator::new(parser);
     let mut fmt = Formatter::new(out);
 
-    while let Some(token) = validator.next() {
+    while let Some(token) = validator.next_str() {
         let token = token?;
         count += 1;
 

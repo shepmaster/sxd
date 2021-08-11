@@ -732,7 +732,7 @@ impl CoreParser {
     }
 
     #[inline]
-    pub fn next(&mut self) -> Option<Result<IndexToken>> {
+    pub fn next_index(&mut self) -> Option<Result<IndexToken>> {
         use State::*;
 
         let to_advance = mem::take(&mut self.to_advance);
@@ -1613,7 +1613,7 @@ where
         } = self;
 
         loop {
-            match parser.next() {
+            match parser.next_index() {
                 None => { /* Get more data */ }
                 Some(Err(e)) if e.needs_more_input() => { /* Get more data */ }
                 Some(Err(e)) => break Some(Err(e)),
@@ -1640,7 +1640,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
+    pub fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
         let v = self.next_index();
         v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.parser.exchange(idx)))))
     }
@@ -1827,7 +1827,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
+    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
         let v = self.next_index();
         v.map(move |r| r.map(move |t| self.exchange(t)))
     }
@@ -2776,7 +2776,7 @@ mod test {
     {
         fn collect_owned(&mut self) -> super::Result<OwnedTokens> {
             let mut v = vec![];
-            while let Some(t) = self.next() {
+            while let Some(t) = self.next_str() {
                 v.push(t?.map(|s| s.map(str::to_owned)));
             }
             Ok(v)
