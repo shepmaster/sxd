@@ -1936,7 +1936,7 @@ mod test {
 
     struct WithCapacity<T>(T, usize);
 
-    fn capacity<'a, T>(c: usize) -> impl FnOnce(T) -> WithCapacity<T> {
+    fn capacity<T>(c: usize) -> impl FnOnce(T) -> WithCapacity<T> {
         move |v| WithCapacity(v, c)
     }
 
