@@ -20,7 +20,7 @@ use std::{
 ///
 /// ⚠ **This type unsafely implements safe traits** ⚠. Extreme care should be taken when using any
 /// trait, even if it is not marked as unsafe.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Eq)]
 struct RawStr(*const u8, usize);
 
 impl RawStr {
@@ -40,6 +40,14 @@ impl RawStr {
     unsafe fn as_unbound_str<'a>(&self) -> &'a str {
         let s = slice::from_raw_parts(self.0, self.1);
         str::from_utf8_unchecked(s)
+    }
+}
+
+impl PartialEq for RawStr {
+    fn eq(&self, other: &Self) -> bool {
+        // We only care about pointer equality as we don't reuse a pointer for more than one string
+        // value.
+        self.0 == other.0
     }
 }
 
@@ -177,13 +185,19 @@ impl Drop for StringSlab {
 /// An opaque handle to an interned string.
 ///
 /// Use [`UnsafeArena::as_str`] if you need the string data.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Eq)]
 pub struct UnsafeKey(RawStr);
 
 impl UnsafeKey {
     fn compare_key(&self) -> (usize, *const u8) {
         let RawStr(ptr, len) = self.0;
         (len, ptr)
+    }
+}
+
+impl PartialEq for UnsafeKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 }
 
