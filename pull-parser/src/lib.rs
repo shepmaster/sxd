@@ -307,7 +307,7 @@ impl StringRing {
         let s = abandon!(self.min_str(3));
 
         match s.find("]]>") {
-            Some(offset) => return Ok(Streaming::Complete(offset)),
+            Some(offset) => Ok(Streaming::Complete(offset)),
             None => {
                 // Once for each `]`
                 let s = s.strip_suffix(']').unwrap_or(s);
@@ -957,7 +957,7 @@ impl CoreParser {
         let quote = self.buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationVersion(quote));
-        return self.dispatch_stream_declaration_version(quote);
+        self.dispatch_stream_declaration_version(quote)
     }
 
     fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
@@ -1817,7 +1817,7 @@ where
 
         match core.finish() {
             Ok(v) => v.map(Ok),
-            Err(e) => return Some(Err(e)),
+            Err(e) => Some(Err(e)),
         }
     }
 
