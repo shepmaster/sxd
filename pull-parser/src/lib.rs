@@ -679,9 +679,15 @@ macro_rules! dispatch_eq_value {
     };
 }
 
+impl Default for CoreParser {
+    fn default() -> Self {
+        Self::with_capacity(StringRing::DEFAULT_CAPACITY)
+    }
+}
+
 impl CoreParser {
     pub fn new() -> Self {
-        Self::with_capacity(StringRing::DEFAULT_CAPACITY)
+        Default::default()
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
