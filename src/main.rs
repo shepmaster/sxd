@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_buffer_size = env_or("INPUT_BUFFER_SIZE", buffer_size);
     let output_buffer_size = env_or("OUTPUT_BUFFER_SIZE", buffer_size);
 
-    let filename = env::args().skip(1).next().expect("Needs one argument");
+    let filename = env::args().nth(1).expect("Needs one argument");
     let file = File::open(&filename).expect("Unable to open file");
 
     let parser = Parser::with_buffer_capacity(file, input_buffer_size);
