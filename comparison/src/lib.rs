@@ -11,7 +11,7 @@ pub fn parse(s: &str) -> Result<usize> {
     let mut parser = Validator::new(Parser::new(s.as_bytes()));
     let mut count = 0;
 
-    while let Some(v) = parser.next() {
+    while let Some(v) = parser.next_str() {
         v?;
         count += 1;
     }

@@ -278,7 +278,7 @@ where
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<FusedToken<'_>>> {
+    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>>> {
         let v = self.next_index();
         let parser = &self.parser;
         v.map(|r| r.map(|t| parser.exchange(t)))
