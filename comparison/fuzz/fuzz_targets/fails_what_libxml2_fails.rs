@@ -4,11 +4,11 @@ use comparison::libxml2_sys;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|s: String| {
-    if let Ok(_) = libxml2_sys::parse(&s) {
+    if libxml2_sys::parse(&s).is_ok() {
         return;
     };
 
-    if let Ok(_) = comparison::parse(&s) {
+    if comparison::parse(&s).is_ok() {
         panic!("libxml2 failed to parse {:?}, but we didn't", s);
     }
 });
