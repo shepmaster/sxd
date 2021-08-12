@@ -15,6 +15,15 @@ fn main() {
     }
 
     let builder = builder
+        // Uses 128-bit types which aren't FFI safe
+        .blocklist_function("qecvt")
+        .blocklist_function("qecvt_r")
+        .blocklist_function("qfcvt")
+        .blocklist_function("qfcvt_r")
+        .blocklist_function("qgcvt")
+        .blocklist_function("strtold")
+        .blocklist_type("_Float64x")
+        .blocklist_type("max_align_t")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks));
