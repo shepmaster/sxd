@@ -99,3 +99,25 @@ jobs:
         with:
           command: fmt
           args: --manifest-path=comparison/fuzz/Cargo.toml --all -- --check
+
+  perf-information:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Check if commit message contains performance information
+        run: >-
+          failed=0
+
+          while read -r sha; do
+            if ! grep -i -E 'no performance change|estimated cycles' <(git show -s --format='%b' "${sha}"); then
+              failed=1
+              echo "::error::Commit ${sha} does not contain performance information"
+            fi
+          done <<< $(git rev-list origin/main..HEAD)
+
+          exit $failed
