@@ -15,6 +15,8 @@ fn main() {
     }
 
     let builder = builder
+        // https://github.com/rust-lang/rust-bindgen/issues/1651
+        .layout_tests(false)
         // Uses 128-bit types which aren't FFI safe
         .blocklist_function("qecvt")
         .blocklist_function("qecvt_r")
