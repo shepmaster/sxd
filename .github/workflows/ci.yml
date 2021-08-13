@@ -114,6 +114,10 @@ jobs:
           failed=0
 
           while read -r sha; do
+            if [[ -z "${sha}" ]]; then
+              continue
+            fi
+
             if ! grep -i -E 'no performance change|estimated cycles' <(git show -s --format='%b' "${sha}"); then
               failed=1
               echo "::error::Commit ${sha} does not contain performance information"
