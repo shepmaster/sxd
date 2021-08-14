@@ -159,6 +159,7 @@ impl ValidatorCore {
                     !element_stack.is_empty(),
                     ReferenceNamedOutsideOfElement { text: v }
                 );
+                ensure!(known_entity(v), ReferenceNamedUnknown { text: v });
             }
             ReferenceDecimal(v) => {
                 let v = v.as_fused_str();
@@ -213,6 +214,10 @@ impl ValidatorCore {
 
         Ok(())
     }
+}
+
+fn known_entity(entity: &str) -> bool {
+    matches!(entity, "lt" | "gt" | "amp" | "quot" | "apos")
 }
 
 fn reference_value(value: &str, radix: u32) -> Result<char, ReferenceValueError> {
@@ -309,6 +314,10 @@ pub enum Error {
         text: String,
     },
     ReferenceHexOutsideOfElement {
+        text: String,
+    },
+
+    ReferenceNamedUnknown {
         text: String,
     },
 
@@ -593,6 +602,34 @@ mod test {
         let e = ValidatorCore::validate_all(vec![ReferenceNamed("lt")]);
 
         assert_error!(&e, Error::InvalidStartItem);
+    }
+
+    #[test]
+    fn may_use_predefined_entities_in_named_reference() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("element"),
+            ElementOpenEnd,
+            ReferenceNamed("lt"),
+            ReferenceNamed("gt"),
+            ReferenceNamed("amp"),
+            ReferenceNamed("quot"),
+            ReferenceNamed("apos"),
+            ElementClose("element"),
+        ]);
+
+        assert_ok!(e);
+    }
+
+    #[test]
+    fn fail_undefined_entity_in_named_reference() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("element"),
+            ElementOpenEnd,
+            ReferenceNamed("a"),
+            ElementClose("element"),
+        ]);
+
+        assert_error!(&e, Error::ReferenceNamedUnknown { text } if text == "a");
     }
 
     mod reference_value {
