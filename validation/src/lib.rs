@@ -42,14 +42,15 @@ impl ValidatorCore {
         K::ElementOpenStart: Fused,
         K::ElementClose: Fused,
         K::AttributeStart: Fused,
+        K::AttributeValueReferenceNamed: Fused,
         K::AttributeValueReferenceDecimal: Fused,
         K::AttributeValueReferenceHex: Fused,
+        K::ReferenceNamed: Fused,
         K::ReferenceDecimal: Fused,
         K::ReferenceHex: Fused,
         K::ProcessingInstructionStart: Fused,
         K::CharData: AsRef<str>,
         K::CData: AsRef<str>,
-        K::ReferenceNamed: AsRef<str>,
     {
         use token::Token::*;
 
@@ -130,6 +131,13 @@ impl ValidatorCore {
                     AttributeDuplicate { name: v },
                 )
             }
+            AttributeValueReferenceNamed(v) => {
+                let v = v.as_fused_str();
+                ensure!(
+                    known_entity(v),
+                    AttributeValueReferenceNamedUnknown { text: v }
+                );
+            }
             AttributeValueReferenceDecimal(v) => {
                 let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
@@ -154,7 +162,7 @@ impl ValidatorCore {
             }
 
             ReferenceNamed(v) => {
-                let v = v.as_ref();
+                let v = v.as_fused_str();
                 ensure!(
                     !element_stack.is_empty(),
                     ReferenceNamedOutsideOfElement { text: v }
@@ -317,6 +325,9 @@ pub enum Error {
         text: String,
     },
 
+    AttributeValueReferenceNamedUnknown {
+        text: String,
+    },
     ReferenceNamedUnknown {
         text: String,
     },
@@ -618,6 +629,18 @@ mod test {
         ]);
 
         assert_ok!(e);
+    }
+
+    #[test]
+    fn fail_undefined_entity_in_attribute_value_named_reference() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("element"),
+            AttributeStart("attribute"),
+            AttributeValueReferenceNamed("a"),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::AttributeValueReferenceNamedUnknown { text } if text == "a");
     }
 
     #[test]
