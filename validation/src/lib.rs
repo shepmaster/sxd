@@ -488,6 +488,10 @@ where
         }
     }
 
+    pub fn inner(&self) -> &Fuse<R> {
+        &self.parser
+    }
+
     pub fn next_index(&mut self) -> Option<Result<FusedIndexToken>> {
         let Self { parser, core } = self;
 
