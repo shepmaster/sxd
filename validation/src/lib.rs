@@ -1,8 +1,9 @@
+use hashbrown::HashSet;
 use once_cell::sync::Lazy;
 use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
-use std::{collections::HashSet, io::Read};
+use std::io::Read;
 use string_slab::{CheckedArena, CheckedKey};
 use token::{Token, TokenKind};
 
