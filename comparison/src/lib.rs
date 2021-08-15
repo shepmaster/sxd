@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 pub use libxml2_sys;
 pub use sxd_pull_parser;
 pub use sxd_validation;

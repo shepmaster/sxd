@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 use std::fmt;
 
 include!(concat!(env!("OUT_DIR"), "/generated_token.rs"));

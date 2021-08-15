@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 use formatter::Formatter;
 use pull_parser::Parser;
 use std::{
