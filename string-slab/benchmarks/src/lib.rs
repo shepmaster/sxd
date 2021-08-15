@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 use hashbrown::HashSet;
 use itertools::Itertools;
 use once_cell::sync::Lazy;

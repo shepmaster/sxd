@@ -1,3 +1,4 @@
+#![deny(rust_2018_idioms)]
 #![feature(c_variadic)]
 
 use std::{

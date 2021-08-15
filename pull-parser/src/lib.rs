@@ -1,5 +1,4 @@
 #![deny(rust_2018_idioms)]
-#![allow(dead_code)]
 
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
@@ -596,13 +595,6 @@ enum Quote {
 }
 
 impl Quote {
-    fn to_char(self) -> char {
-        match self {
-            Self::Single => '\'',
-            Self::Double => '"',
-        }
-    }
-
     fn to_ascii_char(self) -> u8 {
         match self {
             Self::Single => b'\'',

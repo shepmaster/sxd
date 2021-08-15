@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 use quote::{format_ident, quote};
 use std::{
     env,

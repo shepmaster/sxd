@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 use hashbrown::HashSet;
 use once_cell::sync::Lazy;
 use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};

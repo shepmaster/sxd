@@ -1,3 +1,4 @@
+#![deny(rust_2018_idioms)]
 #![no_main]
 
 use comparison::libxml2_sys;

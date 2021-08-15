@@ -1,3 +1,5 @@
+#![deny(rust_2018_idioms)]
+
 use std::{fmt, io::Write};
 use token::{IsComplete, Token, TokenKind};
 
