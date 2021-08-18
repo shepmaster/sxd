@@ -169,6 +169,7 @@ impl StringRing {
         Ok(s.starts_with(needle))
     }
 
+    #[inline(always)]
     fn advance(&mut self, n_bytes: usize) {
         // SAFETY: These help uphold the safety invariants in `as_str`
         assert!(n_bytes <= self.n_utf8_bytes);
@@ -626,6 +627,7 @@ pub struct CoreParser {
 macro_rules! dispatch_eq_value {
     ($k:ident) => {
         paste::paste! {
+            #[inline]
             fn [<dispatch_after_ $k>](&mut self) -> Result<Option<IndexToken>> {
                 self.consume_space(
                     State::[<After $k:camel Space>],
@@ -693,6 +695,7 @@ impl CoreParser {
     // Possible future perf: should only be needed when we immediately
     // jump to another dispatch function. We also don't need to
     // re-set the state at the start of `next`.
+    #[inline]
     fn ratchet(&mut self, state: State) {
         self.state = state;
 
@@ -858,6 +861,7 @@ impl CoreParser {
         Ok(())
     }
 
+    #[inline]
     fn dispatch_initial(&mut self) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
@@ -1071,6 +1075,7 @@ impl CoreParser {
         Ok(Some(DeclarationClose))
     }
 
+    #[inline]
     fn dispatch_stream_element_open_name(
         &mut self,
         f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
@@ -1078,6 +1083,7 @@ impl CoreParser {
         self.stream_from_buffer(f, State::AfterElementOpenName, Token::ElementOpenStart)
     }
 
+    #[inline]
     fn dispatch_stream_element_close_name(
         &mut self,
         f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
@@ -1085,6 +1091,7 @@ impl CoreParser {
         self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
     }
 
+    #[inline]
     fn dispatch_after_element_open_name(&mut self) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
@@ -1102,6 +1109,7 @@ impl CoreParser {
         }
     }
 
+    #[inline]
     fn dispatch_after_element_open_name_required_space(&mut self) -> Result<Option<IndexToken>> {
         self.consume_space(
             State::AfterElementOpenNameSpace,
@@ -1109,6 +1117,7 @@ impl CoreParser {
         )
     }
 
+    #[inline]
     fn dispatch_after_element_open_name_space(&mut self) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
@@ -1124,6 +1133,7 @@ impl CoreParser {
         }
     }
 
+    #[inline]
     fn dispatch_stream_attribute_name(
         &mut self,
         f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
@@ -1141,6 +1151,7 @@ impl CoreParser {
         self.dispatch_after_attribute_open_quote(quote)
     }
 
+    #[inline]
     fn dispatch_after_attribute_open_quote(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
@@ -1214,6 +1225,7 @@ impl CoreParser {
     }
     // ---
 
+    #[inline]
     fn dispatch_stream_attribute_value_literal(
         &mut self,
         quote: Quote,
@@ -1231,6 +1243,7 @@ impl CoreParser {
         Ok(Some(AttributeValueLiteral(value)))
     }
 
+    #[inline]
     fn dispatch_after_element_close_name(&mut self) -> Result<Option<IndexToken>> {
         self.consume_space(
             State::AfterElementCloseNameSpace,
@@ -1238,6 +1251,7 @@ impl CoreParser {
         )
     }
 
+    #[inline]
     fn dispatch_after_element_close_name_space(&mut self) -> Result<Option<IndexToken>> {
         use State::*;
 
@@ -1246,7 +1260,7 @@ impl CoreParser {
         self.ratchet(Initial);
         self.dispatch_initial()
     }
-
+    #[inline]
     fn dispatch_stream_reference_named(
         &mut self,
         f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
@@ -1270,6 +1284,7 @@ impl CoreParser {
         )
     }
 
+    #[inline]
     fn dispatch_after_reference(&mut self) -> Result<Option<IndexToken>> {
         use State::*;
 
@@ -1341,6 +1356,7 @@ impl CoreParser {
         Ok(Some(ProcessingInstructionEnd))
     }
 
+    #[inline]
     fn dispatch_stream_char_data(&mut self) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(StringRing::char_data, State::Initial, Token::CharData)
     }
