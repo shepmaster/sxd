@@ -51,6 +51,26 @@ const TOKEN_DEFS: &[TokenDef] = &[
         has_data: true,
     },
     TokenDef {
+        doc: r#"
+```xml
+<alpha:beta sigma:gamma="value" />
+      ^^^^^
+```
+"#,
+        name: "ElementOpenStartSuffix",
+        has_data: true,
+    },
+    TokenDef {
+        doc: r#"
+```xml
+<alpha:beta sigma:gamma="value" />
+           ^
+```
+"#,
+        name: "ElementOpenStartComplete",
+        has_data: false,
+    },
+    TokenDef {
         doc: r#"`>`"#,
         name: "ElementOpenEnd",
         has_data: false,
@@ -66,9 +86,49 @@ const TOKEN_DEFS: &[TokenDef] = &[
         has_data: true,
     },
     TokenDef {
+        doc: r#"
+```xml
+</alpha:beta>
+       ^^^^^
+```
+"#,
+        name: "ElementCloseSuffix",
+        has_data: true,
+    },
+    TokenDef {
+        doc: r#"
+```xml
+</alpha:beta>
+            ^
+```
+"#,
+        name: "ElementCloseComplete",
+        has_data: false,
+    },
+    TokenDef {
         doc: r#"`foo`"#,
         name: "AttributeStart",
         has_data: true,
+    },
+    TokenDef {
+        doc: r#"
+```xml
+<alpha:beta sigma:gamma="value" />
+                 ^^^^^
+```
+"#,
+        name: "AttributeStartSuffix",
+        has_data: true,
+    },
+    TokenDef {
+        doc: r#"
+```xml
+<alpha:beta sigma:gamma="value" />
+                       ^
+```
+"#,
+        name: "AttributeStartComplete",
+        has_data: false,
     },
     TokenDef {
         doc: r#"`="bar`"#,

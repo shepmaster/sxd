@@ -17,8 +17,11 @@ pub struct Formatter<W> {
     inside_declaration_encoding: bool,
     inside_declaration_standalone: bool,
     inside_element_open_start: bool,
+    inside_element_open_start_suffix: bool,
     inside_element_close: bool,
+    inside_element_close_suffix: bool,
     inside_attribute_start: bool,
+    inside_attribute_start_suffix: bool,
     inside_attribute_value_reference_named: bool,
     inside_attribute_value_reference_decimal: bool,
     inside_attribute_value_reference_hex: bool,
@@ -42,8 +45,11 @@ where
             inside_declaration_encoding: false,
             inside_declaration_standalone: false,
             inside_element_open_start: false,
+            inside_element_open_start_suffix: false,
             inside_element_close: false,
+            inside_element_close_suffix: false,
             inside_attribute_start: false,
+            inside_attribute_start_suffix: false,
             inside_attribute_value_reference_named: false,
             inside_attribute_value_reference_decimal: false,
             inside_attribute_value_reference_hex: false,
@@ -63,8 +69,11 @@ where
         K::DeclarationEncoding: Format,
         K::DeclarationStandalone: Format,
         K::ElementOpenStart: Format,
+        K::ElementOpenStartSuffix: Format,
         K::ElementClose: Format,
+        K::ElementCloseSuffix: Format,
         K::AttributeStart: Format,
+        K::AttributeStartSuffix: Format,
         K::AttributeValueLiteral: Format,
         K::AttributeValueReferenceNamed: Format,
         K::AttributeValueReferenceDecimal: Format,
@@ -125,10 +134,16 @@ where
             ),
             DeclarationClose => write!(output, "?>"),
             ElementOpenStart(v) => pre_post!(inside_element_open_start, ("<"), v,),
+            ElementOpenStartSuffix(v) => pre_post!(inside_element_open_start_suffix, (":"), v,),
+            ElementOpenStartComplete => Ok(()),
             ElementOpenEnd => write!(output, ">"),
             ElementSelfClose => write!(output, "/>"),
-            ElementClose(v) => pre_post!(inside_element_close, ("</"), v, (">")),
-            AttributeStart(v) => pre_post!(inside_attribute_start, (" "), v, ("={}", quote)),
+            ElementClose(v) => pre_post!(inside_element_close, ("</"), v,),
+            ElementCloseSuffix(v) => pre_post!(inside_element_close_suffix, (":"), v,),
+            ElementCloseComplete => write!(output, ">"),
+            AttributeStart(v) => pre_post!(inside_attribute_start, (" "), v,),
+            AttributeStartSuffix(v) => pre_post!(inside_attribute_start_suffix, (":"), v,),
+            AttributeStartComplete => write!(output, "={}", quote),
             AttributeValueLiteral(v) => write!(output, "{}", v),
             AttributeValueReferenceNamed(v) => {
                 pre_post!(inside_attribute_value_reference_named, ("&"), v, (";"))
@@ -238,6 +253,20 @@ mod test {
     }
 
     #[test]
+    fn element_open_start_suffix() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token_str(ElementOpenStart(Complete("ns")))?;
+        f.write_token_str(ElementOpenStartSuffix(Partial("ab")))?;
+        f.write_token_str(ElementOpenStartSuffix(Complete("cd")))?;
+
+        assert_utf8_bytes_eq!(out, br#"<ns:abcd"#);
+
+        Ok(())
+    }
+
+    #[test]
     fn element_close() -> Result {
         let mut out = vec![];
         let mut f = Formatter::new(&mut out);
@@ -245,8 +274,24 @@ mod test {
         f.write_token_str(ElementClose(Partial("ab")))?;
         f.write_token_str(ElementClose(Partial("cd")))?;
         f.write_token_str(ElementClose(Complete("ef")))?;
+        f.write_token_str(ElementCloseComplete)?;
 
         assert_utf8_bytes_eq!(out, br#"</abcdef>"#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn element_close_suffix() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token_str(ElementClose(Complete("ns")))?;
+        f.write_token_str(ElementCloseSuffix(Partial("ab")))?;
+        f.write_token_str(ElementCloseSuffix(Complete("cd")))?;
+        f.write_token_str(ElementCloseComplete)?;
+
+        assert_utf8_bytes_eq!(out, br#"</ns:abcd>"#);
 
         Ok(())
     }
@@ -259,8 +304,24 @@ mod test {
         f.write_token_str(AttributeStart(Partial("ab")))?;
         f.write_token_str(AttributeStart(Partial("cd")))?;
         f.write_token_str(AttributeStart(Complete("ef")))?;
+        f.write_token_str(AttributeStartComplete)?;
 
         assert_utf8_bytes_eq!(out, br#" abcdef=""#);
+
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_start_suffix() -> Result {
+        let mut out = vec![];
+        let mut f = Formatter::new(&mut out);
+
+        f.write_token_str(AttributeStart(Complete("ns")))?;
+        f.write_token_str(AttributeStartSuffix(Partial("ab")))?;
+        f.write_token_str(AttributeStartSuffix(Complete("cd")))?;
+        f.write_token_str(AttributeStartComplete)?;
+
+        assert_utf8_bytes_eq!(out, br#" ns:abcd=""#);
 
         Ok(())
     }
