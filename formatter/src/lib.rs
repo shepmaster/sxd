@@ -161,6 +161,22 @@ mod test {
 
     type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+    #[track_caller]
+    fn assert_utf8_bytes_eq(left: &[u8], right: &[u8]) {
+        use std::str;
+
+        match (str::from_utf8(left), str::from_utf8(right)) {
+            (Ok(left), Ok(right)) => assert_eq!(left, right),
+            _ => assert_eq!(left, right),
+        }
+    }
+
+    macro_rules! assert_utf8_bytes_eq {
+        ($left:expr, $right:expr) => {{
+            assert_utf8_bytes_eq($left.as_ref(), $right.as_ref())
+        }};
+    }
+
     #[test]
     fn declaration_start() -> Result {
         let mut out = vec![];
@@ -170,7 +186,7 @@ mod test {
         f.write_token_str(DeclarationStart(Partial("23")))?;
         f.write_token_str(DeclarationStart(Complete("45")))?;
 
-        assert_eq!(out, br#"<?xml version="1.2345""#);
+        assert_utf8_bytes_eq!(out, br#"<?xml version="1.2345""#);
 
         Ok(())
     }
@@ -184,7 +200,7 @@ mod test {
         f.write_token_str(DeclarationEncoding(Partial("TF-")))?;
         f.write_token_str(DeclarationEncoding(Complete("8")))?;
 
-        assert_eq!(out, br#" encoding="UTF-8""#);
+        assert_utf8_bytes_eq!(out, br#" encoding="UTF-8""#);
 
         Ok(())
     }
@@ -198,7 +214,7 @@ mod test {
         f.write_token_str(DeclarationStandalone(Partial("e")))?;
         f.write_token_str(DeclarationStandalone(Complete("s")))?;
 
-        assert_eq!(out, br#" standalone="yes""#);
+        assert_utf8_bytes_eq!(out, br#" standalone="yes""#);
 
         Ok(())
     }
@@ -212,7 +228,7 @@ mod test {
         f.write_token_str(ElementOpenStart(Partial("cd")))?;
         f.write_token_str(ElementOpenStart(Complete("ef")))?;
 
-        assert_eq!(out, br#"<abcdef"#);
+        assert_utf8_bytes_eq!(out, br#"<abcdef"#);
 
         Ok(())
     }
@@ -226,7 +242,7 @@ mod test {
         f.write_token_str(ElementClose(Partial("cd")))?;
         f.write_token_str(ElementClose(Complete("ef")))?;
 
-        assert_eq!(out, br#"</abcdef>"#);
+        assert_utf8_bytes_eq!(out, br#"</abcdef>"#);
 
         Ok(())
     }
@@ -240,7 +256,7 @@ mod test {
         f.write_token_str(AttributeStart(Partial("cd")))?;
         f.write_token_str(AttributeStart(Complete("ef")))?;
 
-        assert_eq!(out, br#" abcdef=""#);
+        assert_utf8_bytes_eq!(out, br#" abcdef=""#);
 
         Ok(())
     }
@@ -254,7 +270,7 @@ mod test {
         f.write_token_str(AttributeValueLiteral(Partial("cd")))?;
         f.write_token_str(AttributeValueLiteral(Complete("ef")))?;
 
-        assert_eq!(out, br#"abcdef"#);
+        assert_utf8_bytes_eq!(out, br#"abcdef"#);
 
         Ok(())
     }
@@ -268,7 +284,7 @@ mod test {
         f.write_token_str(AttributeValueReferenceNamed(Partial("cd")))?;
         f.write_token_str(AttributeValueReferenceNamed(Complete("ef")))?;
 
-        assert_eq!(out, br#"&abcdef;"#);
+        assert_utf8_bytes_eq!(out, br#"&abcdef;"#);
 
         Ok(())
     }
@@ -282,7 +298,7 @@ mod test {
         f.write_token_str(AttributeValueReferenceDecimal(Partial("34")))?;
         f.write_token_str(AttributeValueReferenceDecimal(Complete("56")))?;
 
-        assert_eq!(out, br#"&#123456;"#);
+        assert_utf8_bytes_eq!(out, br#"&#123456;"#);
 
         Ok(())
     }
@@ -296,7 +312,7 @@ mod test {
         f.write_token_str(AttributeValueReferenceHex(Partial("CD")))?;
         f.write_token_str(AttributeValueReferenceHex(Complete("EF")))?;
 
-        assert_eq!(out, br#"&#xABCDEF;"#);
+        assert_utf8_bytes_eq!(out, br#"&#xABCDEF;"#);
 
         Ok(())
     }
@@ -310,7 +326,7 @@ mod test {
         f.write_token_str(ReferenceNamed(Partial("cd")))?;
         f.write_token_str(ReferenceNamed(Complete("ef")))?;
 
-        assert_eq!(out, br#"&abcdef;"#);
+        assert_utf8_bytes_eq!(out, br#"&abcdef;"#);
 
         Ok(())
     }
@@ -324,7 +340,7 @@ mod test {
         f.write_token_str(ReferenceDecimal(Partial("34")))?;
         f.write_token_str(ReferenceDecimal(Complete("56")))?;
 
-        assert_eq!(out, br#"&#123456;"#);
+        assert_utf8_bytes_eq!(out, br#"&#123456;"#);
 
         Ok(())
     }
@@ -338,7 +354,7 @@ mod test {
         f.write_token_str(ReferenceHex(Partial("CD")))?;
         f.write_token_str(ReferenceHex(Complete("EF")))?;
 
-        assert_eq!(out, br#"&#xABCDEF;"#);
+        assert_utf8_bytes_eq!(out, br#"&#xABCDEF;"#);
 
         Ok(())
     }
@@ -352,7 +368,7 @@ mod test {
         f.write_token_str(CData(Partial("cd")))?;
         f.write_token_str(CData(Complete("ef")))?;
 
-        assert_eq!(out, br#"<![CDATA[abcdef]]>"#);
+        assert_utf8_bytes_eq!(out, br#"<![CDATA[abcdef]]>"#);
 
         Ok(())
     }
@@ -366,7 +382,7 @@ mod test {
         f.write_token_str(ProcessingInstructionStart(Partial("cd")))?;
         f.write_token_str(ProcessingInstructionStart(Complete("ef")))?;
 
-        assert_eq!(out, br#"<?abcdef"#);
+        assert_utf8_bytes_eq!(out, br#"<?abcdef"#);
 
         Ok(())
     }
@@ -380,7 +396,7 @@ mod test {
         f.write_token_str(ProcessingInstructionValue(Partial("cd")))?;
         f.write_token_str(ProcessingInstructionValue(Complete("ef")))?;
 
-        assert_eq!(out, br#"abcdef"#);
+        assert_utf8_bytes_eq!(out, br#"abcdef"#);
 
         Ok(())
     }
@@ -394,7 +410,7 @@ mod test {
         f.write_token_str(Comment(Partial("cd")))?;
         f.write_token_str(Comment(Complete("ef")))?;
 
-        assert_eq!(out, br#"<!--abcdef-->"#);
+        assert_utf8_bytes_eq!(out, br#"<!--abcdef-->"#);
 
         Ok(())
     }
