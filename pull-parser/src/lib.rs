@@ -444,8 +444,8 @@ impl u8 {
     }
 }
 
-#[ext(pub XmlCharExt)]
-impl char {
+#[ext(XmlCharExt)]
+pub impl char {
     #[inline]
     fn is_allowed_xml_char(&self) -> bool {
         // Sorted by how common each case is which noticeably impacts
@@ -503,8 +503,8 @@ impl char {
     }
 }
 
-#[ext(pub XmlStrExt)]
-impl str {
+#[ext(XmlStrExt)]
+pub impl str {
     fn is_xml_space(&self) -> bool {
         self.as_bytes().iter().all(u8::is_xml_space)
     }
