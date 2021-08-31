@@ -1084,14 +1084,6 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_stream_element_close_name(
-        &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
-    }
-
-    #[inline]
     fn dispatch_after_element_open_name(&mut self) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
@@ -1241,6 +1233,14 @@ impl CoreParser {
         }
 
         Ok(Some(AttributeValueLiteral(value)))
+    }
+
+    #[inline]
+    fn dispatch_stream_element_close_name(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<IndexToken>> {
+        self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
     }
 
     #[inline]
