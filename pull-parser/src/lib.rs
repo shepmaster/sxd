@@ -2841,6 +2841,7 @@ mod test {
         }
     }
 
+    #[derive(Debug)]
     struct BufferedParser<'a>(Vec<&'a str>);
 
     impl<'a> BufferedParser<'a> {
@@ -2849,11 +2850,14 @@ mod test {
         ) -> (Self, Vec<IndexToken>) {
             let mut buffered = vec![];
             let mut index_tokens = vec![];
+            let mut index = 0;
 
-            for (i, t) in tokens.into_iter().enumerate() {
+            for t in tokens {
                 let t = t.map(|s| {
                     s.map(|v| {
                         buffered.push(v);
+                        let i = index;
+                        index += 1;
                         i
                     })
                 });
