@@ -977,20 +977,15 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_version_space(&mut self) -> Result<Option<IndexToken>> {
-        use {State::*, Token::*};
+        use State::*;
 
         // TODO: this should require that we've seen a space in order to be allowed
         if *self.buffer.consume("encoding")? {
             self.ratchet(AfterDeclarationEncodingAttribute);
             self.dispatch_after_declaration_encoding_attribute()
-        } else if *self.buffer.consume("standalone")? {
-            self.ratchet(AfterDeclarationStandaloneAttribute);
-            self.dispatch_after_declaration_standalone_attribute()
         } else {
-            self.buffer.require("?>")?;
-
-            self.ratchet(Initial);
-            Ok(Some(DeclarationClose))
+            self.ratchet(AfterDeclarationEncodingSpace);
+            self.dispatch_after_declaration_encoding_space()
         }
     }
 
@@ -1028,16 +1023,14 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_encoding_space(&mut self) -> Result<Option<IndexToken>> {
-        use {State::*, Token::*};
+        use State::*;
 
         if *self.buffer.consume("standalone")? {
             self.ratchet(AfterDeclarationStandaloneAttribute);
             self.dispatch_after_declaration_standalone_attribute()
         } else {
-            self.buffer.require("?>")?;
-
-            self.ratchet(Initial);
-            Ok(Some(DeclarationClose))
+            self.ratchet(AfterDeclarationStandaloneSpace);
+            self.dispatch_after_declaration_standalone_space()
         }
     }
 
