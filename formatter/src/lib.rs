@@ -26,6 +26,7 @@ pub struct Formatter<W> {
     inside_reference_decimal: bool,
     inside_reference_hex: bool,
     inside_processing_instruction_start: bool,
+    inside_processing_instruction_value: bool,
     inside_comment: bool,
 }
 
@@ -50,6 +51,7 @@ where
             inside_reference_decimal: false,
             inside_reference_hex: false,
             inside_processing_instruction_start: false,
+            inside_processing_instruction_value: false,
             inside_comment: false,
         }
     }
@@ -146,7 +148,9 @@ where
             ProcessingInstructionStart(v) => {
                 pre_post!(inside_processing_instruction_start, ("<?"), v,)
             }
-            ProcessingInstructionValue(v) => write!(output, "{}", v),
+            ProcessingInstructionValue(v) => {
+                pre_post!(inside_processing_instruction_value, (" "), v,)
+            }
             ProcessingInstructionEnd => write!(output, "?>"),
             Comment(v) => pre_post!(inside_comment, ("<!--"), v, ("-->")),
         }
@@ -396,7 +400,7 @@ mod test {
         f.write_token_str(ProcessingInstructionValue(Partial("cd")))?;
         f.write_token_str(ProcessingInstructionValue(Complete("ef")))?;
 
-        assert_utf8_bytes_eq!(out, br#"abcdef"#);
+        assert_utf8_bytes_eq!(out, br#" abcdef"#);
 
         Ok(())
     }
