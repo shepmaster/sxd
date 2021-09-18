@@ -2,7 +2,7 @@
 name = "sxd-string-slab"
 version = "0.1.0"
 authors = ["Jake Goulding <jake.goulding@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 description = "A string interning pool tailored for XML documents"
 keywords = ["string", "intern", "pool"]

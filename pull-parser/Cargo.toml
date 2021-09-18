@@ -2,7 +2,7 @@
 name = "sxd-pull-parser"
 version = "0.1.0"
 authors = ["Jake Goulding <jake.goulding@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -195,7 +195,7 @@ fn generate_token() -> proc_macro2::TokenStream {
 
         quote! {
             #[doc = #doc]
-            #name#field
+            #name #field
         }
     });
 
