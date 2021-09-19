@@ -1882,8 +1882,15 @@ where
         v.map(move |r| r.map(move |t| self.exchange(t)))
     }
 
+    pub fn exchange_index(&self, idx: FusedIndex) -> &str {
+        match idx {
+            FusedIndex::Buffered => &*self.core.buffer,
+            FusedIndex::Direct(idx) => self.inner.parser.exchange(idx),
+        }
+    }
+
     pub fn exchange(&self, token: FusedIndexToken) -> FusedToken<'_> {
-        use {FusedIndex::*, Token::*};
+        use Token::*;
 
         macro_rules! exchange_match {
             ($($tt:tt $name:ident,)*) => {
@@ -1896,12 +1903,7 @@ where
             (@arm pass $name:ident $s:ident) => { $name };
 
             (@pat fuse $name:ident $s:ident) => { $name($s) };
-            (@arm fuse $name:ident $s:ident) => {
-                match $s {
-                    Buffered => $name(&*self.core.buffer),
-                    Direct(idx) => $name(self.inner.parser.exchange(idx)),
-                }
-            };
+            (@arm fuse $name:ident $s:ident) => { $name(self.exchange_index($s)) };
 
             (@pat stream $name:ident $s:ident) => { $name($s) };
             (@arm stream $name:ident $s:ident) => { $name($s.map(|i| self.inner.parser.exchange(i))) };
