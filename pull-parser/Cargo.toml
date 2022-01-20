@@ -10,7 +10,7 @@ edition = "2021"
 token = { package = "sxd-token", path = "../token" }
 
 snafu = "0.7.0"
-easy-ext = "0.2.6"
+easy-ext = "1.0.0"
 memchr = "2.3.4"
 paste = "1.0.5"
 
