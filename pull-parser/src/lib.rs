@@ -351,7 +351,7 @@ impl StringRing {
             .as_bytes()
             .iter()
             .position(|c| !c.is_xml_space())
-            .unwrap_or_else(|| s.len());
+            .unwrap_or(s.len());
 
         let all_space = n_bytes_space == s.len();
 
