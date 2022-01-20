@@ -43,6 +43,7 @@ impl ValidatorCore {
         K: TokenKind,
         K::DeclarationStart: Fused,
         K::DeclarationEncoding: Fused,
+        K::DeclarationStandalone: Fused,
         K::ElementOpenStart: Fused,
         K::ElementClose: Fused,
         K::AttributeStart: Fused,
@@ -105,6 +106,15 @@ impl ValidatorCore {
                 ensure!(
                     VALID_ENCODING_STRING.is_match(v),
                     InvalidDeclarationEncodingSnafu { encoding: v }
+                );
+            }
+
+            DeclarationStandalone(v) => {
+                let v = v.as_fused_str();
+
+                ensure!(
+                    matches!(v, "yes" | "no"),
+                    InvalidDeclarationStandaloneSnafu { standalone: v }
                 );
             }
 
@@ -337,6 +347,10 @@ pub enum Error {
         encoding: String,
     },
 
+    InvalidDeclarationStandalone {
+        standalone: String,
+    },
+
     CharDataOutsideOfElement {
         text: String,
     },
@@ -454,6 +468,16 @@ mod test {
             ValidatorCore::validate_all(vec![DeclarationStart("1.0"), DeclarationEncoding("1")]);
 
         assert_error!(&e, Error::InvalidDeclarationEncoding { encoding } if encoding == "1");
+    }
+
+    #[test]
+    fn fail_unknown_declaration_standalone() {
+        let e = ValidatorCore::validate_all(vec![
+            DeclarationStart("1.0"),
+            DeclarationStandalone("maybe"),
+        ]);
+
+        assert_error!(&e, Error::InvalidDeclarationStandalone { standalone } if standalone == "maybe");
     }
 
     #[test]
