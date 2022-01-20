@@ -74,14 +74,14 @@ impl ValidatorCore {
                         | ProcessingInstructionStart(_)
                         | CharData(_)
                 ),
-                InvalidStartItem,
+                InvalidStartItemSnafu,
             );
         }
 
         match &token {
             DeclarationStart(v) => {
                 if *count != 0 {
-                    return DeclarationOnlyAllowedAtStart.fail();
+                    return DeclarationOnlyAllowedAtStartSnafu.fail();
                 }
 
                 static VALID_VERSION_STRING: Lazy<Regex> =
@@ -91,17 +91,20 @@ impl ValidatorCore {
 
                 ensure!(
                     VALID_VERSION_STRING.is_match(v),
-                    InvalidDeclarationVersion { version: v }
+                    InvalidDeclarationVersionSnafu { version: v }
                 );
             }
 
             ElementOpenStart(v) => {
                 let v = v.as_fused_str();
 
-                ensure!(!v.is_empty(), ElementNameEmpty);
+                ensure!(!v.is_empty(), ElementNameEmptySnafu);
 
                 if element_stack.is_empty() {
-                    ensure!(!*seen_one_element, MultipleTopLevelElements { name: v });
+                    ensure!(
+                        !*seen_one_element,
+                        MultipleTopLevelElementsSnafu { name: v }
+                    );
                     *seen_one_element = true;
                 }
 
@@ -109,15 +112,17 @@ impl ValidatorCore {
                 attributes.clear();
             }
             ElementSelfClose => {
-                element_stack.pop().context(ElementSelfClosedWithoutOpen)?;
+                element_stack
+                    .pop()
+                    .context(ElementSelfClosedWithoutOpenSnafu)?;
             }
             ElementClose(v) => {
                 let v = v.as_fused_str();
                 let v = arena.intern(v);
-                let name = element_stack.pop().context(ElementClosedWithoutOpen)?;
+                let name = element_stack.pop().context(ElementClosedWithoutOpenSnafu)?;
                 ensure!(
                     name == v,
-                    ElementOpenAndCloseMismatched {
+                    ElementOpenAndCloseMismatchedSnafu {
                         open: &arena[name],
                         close: &arena[v],
                     },
@@ -127,76 +132,79 @@ impl ValidatorCore {
             AttributeStart(v) => {
                 let v = v.as_fused_str();
 
-                ensure!(!v.is_empty(), AttributeNameEmpty);
+                ensure!(!v.is_empty(), AttributeNameEmptySnafu);
 
                 ensure!(
                     attributes.insert(arena.intern(v)),
-                    AttributeDuplicate { name: v },
+                    AttributeDuplicateSnafu { name: v },
                 )
             }
             AttributeValueReferenceNamed(v) => {
                 let v = v.as_fused_str();
                 ensure!(
                     known_entity(v),
-                    AttributeValueReferenceNamedUnknown { text: v }
+                    AttributeValueReferenceNamedUnknownSnafu { text: v }
                 );
             }
             AttributeValueReferenceDecimal(v) => {
                 let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 10).context(InvalidAttributeValueReferenceDecimal)?;
+                reference_value(v, 10).context(InvalidAttributeValueReferenceDecimalSnafu)?;
             }
             AttributeValueReferenceHex(v) => {
                 let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 16).context(InvalidAttributeValueReferenceHex)?;
+                reference_value(v, 16).context(InvalidAttributeValueReferenceHexSnafu)?;
             }
 
             CharData(v) => {
                 let v = v.as_ref();
                 ensure!(
                     !element_stack.is_empty() || v.is_xml_space(),
-                    CharDataOutsideOfElement { text: v }
+                    CharDataOutsideOfElementSnafu { text: v }
                 );
             }
             CData(v) => {
                 let v = v.as_ref();
-                ensure!(!element_stack.is_empty(), CDataOutsideOfElement { text: v });
+                ensure!(
+                    !element_stack.is_empty(),
+                    CDataOutsideOfElementSnafu { text: v }
+                );
             }
 
             ReferenceNamed(v) => {
                 let v = v.as_fused_str();
                 ensure!(
                     !element_stack.is_empty(),
-                    ReferenceNamedOutsideOfElement { text: v }
+                    ReferenceNamedOutsideOfElementSnafu { text: v }
                 );
-                ensure!(known_entity(v), ReferenceNamedUnknown { text: v });
+                ensure!(known_entity(v), ReferenceNamedUnknownSnafu { text: v });
             }
             ReferenceDecimal(v) => {
                 let v = v.as_fused_str();
                 ensure!(
                     !element_stack.is_empty(),
-                    ReferenceDecimalOutsideOfElement { text: v }
+                    ReferenceDecimalOutsideOfElementSnafu { text: v }
                 );
                 // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 10).context(InvalidReferenceDecimal)?;
+                reference_value(v, 10).context(InvalidReferenceDecimalSnafu)?;
             }
             ReferenceHex(v) => {
                 let v = v.as_fused_str();
                 ensure!(
                     !element_stack.is_empty(),
-                    ReferenceHexOutsideOfElement { text: v }
+                    ReferenceHexOutsideOfElementSnafu { text: v }
                 );
                 // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 16).context(InvalidReferenceHex)?;
+                reference_value(v, 16).context(InvalidReferenceHexSnafu)?;
             }
 
             ProcessingInstructionStart(v) => {
                 let v = v.as_fused_str();
-                ensure!(!v.is_empty(), ProcessingInstructionNameEmpty);
+                ensure!(!v.is_empty(), ProcessingInstructionNameEmptySnafu);
                 ensure!(
                     !v.eq_ignore_ascii_case("xml"),
-                    ProcessingInstructionInvalidName { name: v }
+                    ProcessingInstructionInvalidNameSnafu { name: v }
                 );
             }
 
@@ -218,10 +226,10 @@ impl ValidatorCore {
 
         if let Some(opened) = element_stack.pop() {
             let name = &arena[opened];
-            return ElementOpenedWithoutClose { name }.fail();
+            return ElementOpenedWithoutCloseSnafu { name }.fail();
         }
 
-        ensure!(*seen_one_element, NoTopLevelElements);
+        ensure!(*seen_one_element, NoTopLevelElementsSnafu);
 
         Ok(())
     }
@@ -232,11 +240,11 @@ fn known_entity(entity: &str) -> bool {
 }
 
 fn reference_value(value: &str, radix: u32) -> Result<char, ReferenceValueError> {
-    let value = u32::from_str_radix(value, radix).context(InvalidValue { value })?;
-    let value = char::from_u32(value).context(InvalidUnicodeCharacter { value })?;
+    let value = u32::from_str_radix(value, radix).context(InvalidValueSnafu { value })?;
+    let value = char::from_u32(value).context(InvalidUnicodeCharacterSnafu { value })?;
     ensure!(
         value.is_allowed_xml_char(),
-        DisallowedUnicodeCharacter { value }
+        DisallowedUnicodeCharacterSnafu { value }
     );
     Ok(value)
 }

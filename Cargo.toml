@@ -18,6 +18,7 @@ lto = "thin"
 members = [
     "pull-parser",
     "string-slab",
+    "string-slab/benchmarks",
     "token",
     "validation",
 ]

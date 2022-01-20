@@ -160,8 +160,13 @@ pub fn rng() -> StdRng {
 
 fn string_iter(rng: &mut impl Rng, max_len: usize) -> impl Iterator<Item = String> + '_ {
     iter::from_fn(move || {
-        let string_len = rng.gen_range(0, max_len);
-        Some(rng.sample_iter(Alphanumeric).take(string_len).collect())
+        let string_len = rng.gen_range(0..max_len);
+        let s = rng
+            .sample_iter(Alphanumeric)
+            .take(string_len)
+            .map(char::from)
+            .collect();
+        Some(s)
     })
 }
 
@@ -177,7 +182,7 @@ pub fn generate_with_duplicates(n_items: usize, max_str_len: usize) -> Vec<Strin
     let no_dupes: HashSet<_> = string_iter(rng, max_str_len).take(n_items).collect();
     let mut no_dupes: Vec<_> = no_dupes.into_iter().collect();
 
-    let n_dupes = rng.gen_range(0, no_dupes.len());
+    let n_dupes = rng.gen_range(0..no_dupes.len());
     let dupes: Vec<_> = no_dupes.choose_multiple(rng, n_dupes).cloned().collect();
     no_dupes.extend(dupes);
     no_dupes.shuffle(rng);

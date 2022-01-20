@@ -11,10 +11,10 @@ pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
 token = { package = "sxd-token", path = "../token" }
 string-slab = { package = "sxd-string-slab", path = "../string-slab" }
 
-hashbrown = { version = "0.11.0", default-features = false, features = ["ahash", "inline-more"] }
+hashbrown = { version = "0.12.0", default-features = false, features = ["ahash", "inline-more"] }
 once_cell = { version = "1.7.0", default-features = false, features = ["std"] }
 regex = { version = "1.4.3", default-features = false, features = ["std"] }
-snafu = "0.6.10"
+snafu = "0.7.0"
 
 [dev-dependencies]
 iai = "0.1.1"
