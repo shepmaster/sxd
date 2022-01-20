@@ -977,20 +977,15 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_version_space(&mut self) -> Result<Option<IndexToken>> {
-        use {State::*, Token::*};
+        use State::*;
 
         // TODO: this should require that we've seen a space in order to be allowed
         if *self.buffer.consume("encoding")? {
             self.ratchet(AfterDeclarationEncodingAttribute);
             self.dispatch_after_declaration_encoding_attribute()
-        } else if *self.buffer.consume("standalone")? {
-            self.ratchet(AfterDeclarationStandaloneAttribute);
-            self.dispatch_after_declaration_standalone_attribute()
         } else {
-            self.buffer.require("?>")?;
-
-            self.ratchet(Initial);
-            Ok(Some(DeclarationClose))
+            self.ratchet(AfterDeclarationEncodingSpace);
+            self.dispatch_after_declaration_encoding_space()
         }
     }
 
@@ -1028,16 +1023,14 @@ impl CoreParser {
     }
 
     fn dispatch_after_declaration_encoding_space(&mut self) -> Result<Option<IndexToken>> {
-        use {State::*, Token::*};
+        use State::*;
 
         if *self.buffer.consume("standalone")? {
             self.ratchet(AfterDeclarationStandaloneAttribute);
             self.dispatch_after_declaration_standalone_attribute()
         } else {
-            self.buffer.require("?>")?;
-
-            self.ratchet(Initial);
-            Ok(Some(DeclarationClose))
+            self.ratchet(AfterDeclarationStandaloneSpace);
+            self.dispatch_after_declaration_standalone_space()
         }
     }
 
@@ -1092,14 +1085,6 @@ impl CoreParser {
         f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
     ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(f, State::AfterElementOpenName, Token::ElementOpenStart)
-    }
-
-    #[inline]
-    fn dispatch_stream_element_close_name(
-        &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
     }
 
     #[inline]
@@ -1252,6 +1237,14 @@ impl CoreParser {
         }
 
         Ok(Some(AttributeValueLiteral(value)))
+    }
+
+    #[inline]
+    fn dispatch_stream_element_close_name(
+        &mut self,
+        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+    ) -> Result<Option<IndexToken>> {
+        self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
     }
 
     #[inline]
@@ -2848,6 +2841,7 @@ mod test {
         }
     }
 
+    #[derive(Debug)]
     struct BufferedParser<'a>(Vec<&'a str>);
 
     impl<'a> BufferedParser<'a> {
@@ -2856,11 +2850,14 @@ mod test {
         ) -> (Self, Vec<IndexToken>) {
             let mut buffered = vec![];
             let mut index_tokens = vec![];
+            let mut index = 0;
 
-            for (i, t) in tokens.into_iter().enumerate() {
+            for t in tokens {
                 let t = t.map(|s| {
                     s.map(|v| {
                         buffered.push(v);
+                        let i = index;
+                        index += 1;
                         i
                     })
                 });
