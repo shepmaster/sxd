@@ -265,6 +265,17 @@ impl StringRing {
         }
     }
 
+    /// Contrary to [`attribute_value`], this does not allow for
+    /// less-than or ampersands inside the value.
+    fn plain_attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<usize>> {
+        let s = abandon!(self.some_str());
+
+        match memchr::memchr(quote_style.to_ascii_char(), s.as_bytes()) {
+            Some(x) => Ok(Streaming::Complete(x)),
+            None => Ok(Streaming::Partial(s.len())),
+        }
+    }
+
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
     fn char_data(&mut self) -> Result<Streaming<usize>> {
         // 3 so we will be able to tell if we start with `]]>`
@@ -946,7 +957,7 @@ impl CoreParser {
     fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.attribute_value(quote)?;
+        let value = self.buffer.plain_attribute_value(quote)?;
 
         self.to_advance = *value.unify();
 
@@ -997,7 +1008,7 @@ impl CoreParser {
     fn dispatch_stream_declaration_encoding(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.attribute_value(quote)?;
+        let value = self.buffer.plain_attribute_value(quote)?;
 
         self.to_advance = *value.unify();
 
@@ -1047,7 +1058,7 @@ impl CoreParser {
     ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.attribute_value(quote)?;
+        let value = self.buffer.plain_attribute_value(quote)?;
 
         self.to_advance = *value.unify();
 
@@ -2617,6 +2628,23 @@ mod test {
             token: RequiredToken::Version,
             location: 5
         }))
+    }
+
+    #[test]
+    fn fail_declaration_invalid_version_close() -> Result {
+        expect(r"<?xml version='1.0&?>").to(fail_parsing_with!(Error::IncompleteXml))
+    }
+
+    #[test]
+    fn fail_declaration_invalid_encoding_close() -> Result {
+        expect(r"<?xml version='1.0' encoding='UTF-8&?>")
+            .to(fail_parsing_with!(Error::IncompleteXml))
+    }
+
+    #[test]
+    fn fail_declaration_invalid_standalone_close() -> Result {
+        expect(r"<?xml version='1.0' standalone='no&?>")
+            .to(fail_parsing_with!(Error::IncompleteXml))
     }
 
     #[test]

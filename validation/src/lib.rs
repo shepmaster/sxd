@@ -42,6 +42,8 @@ impl ValidatorCore {
     where
         K: TokenKind,
         K::DeclarationStart: Fused,
+        K::DeclarationEncoding: Fused,
+        K::DeclarationStandalone: Fused,
         K::ElementOpenStart: Fused,
         K::ElementClose: Fused,
         K::AttributeStart: Fused,
@@ -92,6 +94,27 @@ impl ValidatorCore {
                 ensure!(
                     VALID_VERSION_STRING.is_match(v),
                     InvalidDeclarationVersionSnafu { version: v }
+                );
+            }
+
+            DeclarationEncoding(v) => {
+                static VALID_ENCODING_STRING: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r#"[A-Za-z]([A-Za-z0-9._]|'-')*"#).unwrap());
+
+                let v = v.as_fused_str();
+
+                ensure!(
+                    VALID_ENCODING_STRING.is_match(v),
+                    InvalidDeclarationEncodingSnafu { encoding: v }
+                );
+            }
+
+            DeclarationStandalone(v) => {
+                let v = v.as_fused_str();
+
+                ensure!(
+                    matches!(v, "yes" | "no"),
+                    InvalidDeclarationStandaloneSnafu { standalone: v }
                 );
             }
 
@@ -320,6 +343,14 @@ pub enum Error {
         version: String,
     },
 
+    InvalidDeclarationEncoding {
+        encoding: String,
+    },
+
+    InvalidDeclarationStandalone {
+        standalone: String,
+    },
+
     CharDataOutsideOfElement {
         text: String,
     },
@@ -429,6 +460,24 @@ mod test {
         let e = ValidatorCore::validate_all(vec![DeclarationStart("1.a")]);
 
         assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.a");
+    }
+
+    #[test]
+    fn fail_unknown_declaration_encoding() {
+        let e =
+            ValidatorCore::validate_all(vec![DeclarationStart("1.0"), DeclarationEncoding("1")]);
+
+        assert_error!(&e, Error::InvalidDeclarationEncoding { encoding } if encoding == "1");
+    }
+
+    #[test]
+    fn fail_unknown_declaration_standalone() {
+        let e = ValidatorCore::validate_all(vec![
+            DeclarationStart("1.0"),
+            DeclarationStandalone("maybe"),
+        ]);
+
+        assert_error!(&e, Error::InvalidDeclarationStandalone { standalone } if standalone == "maybe");
     }
 
     #[test]
