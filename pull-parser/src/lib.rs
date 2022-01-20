@@ -60,7 +60,7 @@ impl StringRing {
     fn weak_min_str(&mut self, len: usize) -> Result<&str> {
         ensure!(
             self.n_utf8_bytes >= len || self.source_exhausted,
-            NeedsMoreInput
+            NeedsMoreInputSnafu
         );
         Ok(self.as_str())
     }
@@ -68,9 +68,9 @@ impl StringRing {
     fn min_str(&mut self, len: usize) -> Result<&str> {
         if self.n_utf8_bytes < len {
             if self.source_exhausted {
-                return InputExhausted.fail();
+                return InputExhaustedSnafu.fail();
             } else {
-                return NeedsMoreInput.fail();
+                return NeedsMoreInputSnafu.fail();
             }
         }
 
@@ -126,7 +126,7 @@ impl StringRing {
             Ok(s) => s.len(),
             Err(e) => match e.error_len() {
                 Some(length) => {
-                    return InputNotUtf8 {
+                    return InputNotUtf8Snafu {
                         location: self.absolute_location() + self.n_utf8_bytes + e.valid_up_to(),
                         length,
                     }
@@ -143,7 +143,7 @@ impl StringRing {
             for (idx, c) in s.char_indices() {
                 ensure!(
                     c.is_allowed_xml_char(),
-                    InvalidChar {
+                    InvalidCharSnafu {
                         location: self.n_retired_bytes
                             + self.n_offset_bytes
                             + self.n_utf8_bytes
@@ -237,7 +237,7 @@ impl StringRing {
 
     fn require(&mut self, token: &'static str) -> Result<()> {
         self.require_or_else(token, |location| {
-            RequiredTokenMissing {
+            RequiredTokenMissingSnafu {
                 token: RequiredToken::from_token(token),
                 location,
             }
@@ -252,7 +252,7 @@ impl StringRing {
             Ok(Quote::Single)
         } else {
             let location = self.absolute_location();
-            ExpectedSingleOrDoubleQuote { location }.fail()
+            ExpectedSingleOrDoubleQuoteSnafu { location }.fail()
         }
     }
 
@@ -356,7 +356,7 @@ impl StringRing {
         let all_space = n_bytes_space == s.len();
 
         self.advance(n_bytes_space);
-        ensure!(!all_space, NeedsMoreInputSpace { n_bytes_space });
+        ensure!(!all_space, NeedsMoreInputSpaceSnafu { n_bytes_space });
 
         Ok(n_bytes_space)
     }
@@ -856,7 +856,7 @@ impl CoreParser {
     fn finish(&mut self) -> Result<()> {
         ensure!(
             matches!(self.state, State::Initial | State::StreamCharData),
-            IncompleteXml
+            IncompleteXmlSnafu
         );
         Ok(())
     }
@@ -915,7 +915,7 @@ impl CoreParser {
             self.dispatch_stream_reference_named(StringRing::name)
         } else {
             let location = self.buffer.absolute_location();
-            InvalidXml { location }.fail()
+            InvalidXmlSnafu { location }.fail()
         }
     }
 
@@ -1168,7 +1168,7 @@ impl CoreParser {
             self.ratchet(StreamAttributeValueReferenceNamed(quote));
             self.dispatch_stream_attribute_value_reference_named(quote, StringRing::name)
         } else if self.buffer.starts_with("<")? {
-            InvalidCharacterInAttribute {
+            InvalidCharacterInAttributeSnafu {
                 location: self.buffer.absolute_location(),
             }
             .fail()
@@ -1381,8 +1381,9 @@ impl CoreParser {
     fn dispatch_after_comment(&mut self) -> Result<Option<IndexToken>> {
         use State::*;
 
-        self.buffer
-            .require_or_else("-->", |location| DoubleHyphenInComment { location }.build())?;
+        self.buffer.require_or_else("-->", |location| {
+            DoubleHyphenInCommentSnafu { location }.build()
+        })?;
 
         self.ratchet(Initial);
         self.dispatch_initial()
@@ -1396,7 +1397,7 @@ impl CoreParser {
         next_state_fn: impl FnOnce(&mut Self) -> Result<Option<IndexToken>>,
     ) -> Result<Option<IndexToken>> {
         match self.buffer.consume_space() {
-            Ok(0) => RequiredSpaceMissing {
+            Ok(0) => RequiredSpaceMissingSnafu {
                 location: self.buffer.absolute_location(),
             }
             .fail(),
@@ -1495,63 +1496,62 @@ pub enum Error {
     InputExhausted,
 
     #[snafu(display(
-        "The {} bytes of input data, starting at byte {}, are not allowed in XML",
-        length,
-        location,
+        "The {length} bytes of input data, starting at byte {location}, are not allowed in XML"
     ))]
     InvalidChar {
+        #[snafu(implicit(false))]
         location: usize,
         length: usize,
     },
 
     #[snafu(display(
-        "The {} bytes of input data, starting at byte {}, was not UTF-8",
-        length,
-        location,
+        "The {length} bytes of input data, starting at byte {location}, was not UTF-8"
     ))]
     InputNotUtf8 {
+        #[snafu(implicit(false))]
         location: usize,
         length: usize,
     },
 
-    #[snafu(display(
-        "Expected the token {:?} at byte {}, but it was missing",
-        token,
-        location
-    ))]
+    #[snafu(display("Expected the token {token:?} at byte {location}, but it was missing"))]
     RequiredTokenMissing {
         token: RequiredToken,
+        #[snafu(implicit(false))]
         location: usize,
     },
 
     #[snafu(display("Required space but it was missing"))]
     RequiredSpaceMissing {
+        #[snafu(implicit(false))]
         location: usize,
     },
 
     #[snafu(display(
-        "Expected either a single or double quote around the attribute value at byte {}",
-        location,
+        "Expected either a single or double quote around the attribute value at byte {location}"
     ))]
     ExpectedSingleOrDoubleQuote {
+        #[snafu(implicit(false))]
         location: usize,
     },
 
-    #[snafu(display("An invalid character is inside an attribute at byte {}", location))]
+    #[snafu(display("An invalid character is inside an attribute at byte {location}"))]
     InvalidCharacterInAttribute {
+        #[snafu(implicit(false))]
         location: usize,
     },
 
-    #[snafu(display("A double hyphen is inside a comment at byte {}", location,))]
+    #[snafu(display("A double hyphen is inside a comment at byte {location}"))]
     DoubleHyphenInComment {
+        #[snafu(implicit(false))]
         location: usize,
     },
 
     #[snafu(display("The input data did not end in a valid state"))]
     IncompleteXml,
 
-    #[snafu(display("The input data is not valid XML starting at byte {}", location))]
+    #[snafu(display("The input data is not valid XML starting at byte {location}"))]
     InvalidXml {
+        #[snafu(implicit(false))]
         location: usize,
     },
 }
@@ -1774,7 +1774,7 @@ impl FuseCore {
 
     fn finish(&mut self) -> Result<Option<FusedIndexToken>, FuseError> {
         match self.current.take() {
-            Some(_) => Incomplete.fail(),
+            Some(_) => IncompleteSnafu.fail(),
             None => Ok(None),
         }
     }
