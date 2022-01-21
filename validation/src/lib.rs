@@ -8,6 +8,17 @@ use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::io::Read;
 use string_slab::{CheckedArena, CheckedKey};
 use token::{Token, TokenKind};
+use util::{QName, QNameBuilder};
+
+trait Exchange {
+    fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str>;
+}
+
+impl Exchange for CheckedArena {
+    fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str> {
+        qname.map(|v| &self[v])
+    }
+}
 
 trait Fused {
     fn as_fused_str(&self) -> &str;
@@ -31,10 +42,13 @@ impl Fused for str {
 #[derive(Debug, Default)]
 struct ValidatorCore {
     arena: CheckedArena,
-    element_stack: Vec<CheckedKey>,
-    attributes: HashSet<CheckedKey>,
+    element_stack: Vec<QName<CheckedKey>>,
+    attributes: HashSet<QName<CheckedKey>>,
     count: usize,
     seen_one_element: bool,
+    pending_element_open_start_name: Option<QNameBuilder<CheckedKey>>,
+    pending_element_close_name: Option<QNameBuilder<CheckedKey>>,
+    pending_attribute_name: Option<QNameBuilder<CheckedKey>>,
 }
 
 impl ValidatorCore {
@@ -45,8 +59,11 @@ impl ValidatorCore {
         K::DeclarationEncoding: Fused,
         K::DeclarationStandalone: Fused,
         K::ElementOpenStart: Fused,
+        K::ElementOpenStartSuffix: Fused,
         K::ElementClose: Fused,
+        K::ElementCloseSuffix: Fused,
         K::AttributeStart: Fused,
+        K::AttributeStartSuffix: Fused,
         K::AttributeValueReferenceNamed: Fused,
         K::AttributeValueReferenceDecimal: Fused,
         K::AttributeValueReferenceHex: Fused,
@@ -59,15 +76,7 @@ impl ValidatorCore {
     {
         use token::Token::*;
 
-        let Self {
-            arena,
-            element_stack,
-            attributes,
-            count,
-            seen_one_element,
-        } = self;
-
-        if *count == 0 {
+        if self.count == 0 {
             ensure!(
                 matches!(
                     token,
@@ -81,9 +90,30 @@ impl ValidatorCore {
             );
         }
 
+        if !matches!(token, ElementOpenStartSuffix(..)) {
+            self.flush_element_open_start()?;
+        }
+
+        if !matches!(token, ElementCloseSuffix(..)) {
+            self.flush_element_close()?;
+        }
+
+        if !matches!(token, AttributeStartSuffix(..)) {
+            self.flush_attribute_start()?;
+        }
+
+        let Self {
+            arena,
+            element_stack,
+            pending_element_open_start_name,
+            pending_element_close_name,
+            pending_attribute_name,
+            ..
+        } = self;
+
         match &token {
             DeclarationStart(v) => {
-                if *count != 0 {
+                if self.count != 0 {
                     return DeclarationOnlyAllowedAtStartSnafu.fail();
                 }
 
@@ -118,33 +148,47 @@ impl ValidatorCore {
 
                 ensure!(!v.is_empty(), ElementNameEmptySnafu);
 
-                if element_stack.is_empty() {
-                    ensure!(
-                        !*seen_one_element,
-                        MultipleTopLevelElementsSnafu { name: v }
-                    );
-                    *seen_one_element = true;
-                }
-
-                element_stack.push(arena.intern(v));
-                attributes.clear();
+                *pending_element_open_start_name = Some(QNameBuilder::new(arena.intern(v)));
             }
+
+            ElementOpenStartSuffix(v) => {
+                let v = v.as_fused_str();
+
+                ensure!(!v.is_empty(), ElementNameSuffixEmptySnafu);
+
+                let pending = pending_element_open_start_name
+                    .take()
+                    .context(ElementNameSuffixWithoutPrefixSnafu)?;
+
+                let local_part = arena.intern(v);
+                let name = pending.push(local_part);
+
+                self.finish_element_open_start(name)?;
+            }
+
             ElementSelfClose => {
                 element_stack
                     .pop()
                     .context(ElementSelfClosedWithoutOpenSnafu)?;
             }
+
             ElementClose(v) => {
                 let v = v.as_fused_str();
                 let v = arena.intern(v);
-                let name = element_stack.pop().context(ElementClosedWithoutOpenSnafu)?;
-                ensure!(
-                    name == v,
-                    ElementOpenAndCloseMismatchedSnafu {
-                        open: &arena[name],
-                        close: &arena[v],
-                    },
-                )
+                *pending_element_close_name = Some(QNameBuilder::new(v));
+            }
+
+            ElementCloseSuffix(v) => {
+                let v = v.as_fused_str();
+
+                let pending = pending_element_close_name
+                    .take()
+                    .context(ElementCloseSuffixWithoutPrefixSnafu)?;
+
+                let local_part = arena.intern(v);
+                let name = pending.push(local_part);
+
+                self.finish_element_close(name)?;
             }
 
             AttributeStart(v) => {
@@ -152,11 +196,23 @@ impl ValidatorCore {
 
                 ensure!(!v.is_empty(), AttributeNameEmptySnafu);
 
-                ensure!(
-                    attributes.insert(arena.intern(v)),
-                    AttributeDuplicateSnafu { name: v },
-                )
+                *pending_attribute_name = Some(QNameBuilder::new(arena.intern(v)));
             }
+            AttributeStartSuffix(v) => {
+                let v = v.as_fused_str();
+
+                ensure!(!v.is_empty(), AttributeNameSuffixEmptySnafu);
+
+                let pending = pending_attribute_name
+                    .take()
+                    .context(AttributeNameSuffixWithoutPrefixSnafu)?;
+
+                let local_part = arena.intern(v);
+                let name = pending.push(local_part);
+
+                self.finish_attribute_start(name)?;
+            }
+
             AttributeValueReferenceNamed(v) => {
                 let v = v.as_fused_str();
                 ensure!(
@@ -229,12 +285,105 @@ impl ValidatorCore {
             _ => {}
         };
 
-        *count += 1;
+        self.count += 1;
+
+        Ok(())
+    }
+
+    fn flush_element_open_start(&mut self) -> Result<()> {
+        if let Some(name) = self.pending_element_open_start_name.take() {
+            let name = name.finish();
+
+            self.finish_element_open_start(name)?;
+        }
+
+        Ok(())
+    }
+
+    fn finish_element_open_start(&mut self, name: QName<CheckedKey>) -> Result<()> {
+        let Self {
+            seen_one_element,
+            element_stack,
+            attributes,
+            arena,
+            ..
+        } = self;
+
+        if element_stack.is_empty() {
+            ensure!(
+                !*seen_one_element,
+                MultipleTopLevelElementsSnafu {
+                    name: arena.exchange(name)
+                }
+            );
+            *seen_one_element = true;
+        }
+
+        element_stack.push(name);
+        attributes.clear();
+
+        Ok(())
+    }
+
+    fn flush_element_close(&mut self) -> Result<()> {
+        if let Some(name) = self.pending_element_close_name.take() {
+            let name = name.finish();
+
+            self.finish_element_close(name)?;
+        }
+
+        Ok(())
+    }
+
+    fn finish_element_close(&mut self, close: QName<CheckedKey>) -> Result<()> {
+        let Self {
+            element_stack,
+            arena,
+            ..
+        } = self;
+
+        let open = element_stack.pop().context(ElementClosedWithoutOpenSnafu)?;
+        ensure!(
+            open == close,
+            ElementOpenAndCloseMismatchedSnafu {
+                open: arena.exchange(open),
+                close: arena.exchange(close),
+            },
+        );
+
+        Ok(())
+    }
+
+    fn flush_attribute_start(&mut self) -> Result<()> {
+        if let Some(name) = self.pending_attribute_name.take() {
+            let name = name.finish();
+
+            self.finish_attribute_start(name)?;
+        }
+
+        Ok(())
+    }
+
+    fn finish_attribute_start(&mut self, name: QName<CheckedKey>) -> Result<()> {
+        let Self {
+            attributes, arena, ..
+        } = self;
+
+        ensure!(
+            attributes.insert(name),
+            AttributeDuplicateSnafu {
+                name: arena.exchange(name),
+            },
+        );
 
         Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
+        self.flush_element_open_start()?;
+        self.flush_element_close()?;
+        self.flush_attribute_start()?;
+
         let Self {
             arena,
             element_stack,
@@ -243,7 +392,7 @@ impl ValidatorCore {
         } = self;
 
         if let Some(opened) = element_stack.pop() {
-            let name = &arena[opened];
+            let name = arena.exchange(opened);
             return ElementOpenedWithoutCloseSnafu { name }.fail();
         }
 
@@ -383,27 +532,35 @@ pub enum Error {
     },
 
     ElementNameEmpty,
+    ElementNameSuffixEmpty,
+    ElementNameSuffixWithoutPrefix,
+
+    ElementCloseSuffixWithoutPrefix,
+
     AttributeNameEmpty,
+    AttributeNameSuffixEmpty,
+    AttributeNameSuffixWithoutPrefix,
+
     ProcessingInstructionNameEmpty,
 
     ElementOpenedWithoutClose {
-        name: String,
+        name: QName<String>,
     },
     ElementSelfClosedWithoutOpen,
     ElementClosedWithoutOpen,
     ElementOpenAndCloseMismatched {
-        open: String,
-        close: String,
+        open: QName<String>,
+        close: QName<String>,
     },
 
     NoTopLevelElements,
 
     MultipleTopLevelElements {
-        name: String,
+        name: QName<String>,
     },
 
     AttributeDuplicate {
-        name: String,
+        name: QName<String>,
     },
 
     ProcessingInstructionInvalidName {
@@ -551,6 +708,36 @@ mod test {
     }
 
     #[test]
+    fn fail_element_name_suffix_empty() {
+        let e =
+            ValidatorCore::validate_all(vec![ElementOpenStart("a"), ElementOpenStartSuffix("")]);
+
+        assert_error!(&e, Error::ElementNameSuffixEmpty);
+    }
+
+    #[test]
+    fn fail_element_name_suffix_without_prefix() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementOpenEnd,
+            ElementOpenStartSuffix("b"),
+        ]);
+
+        assert_error!(&e, Error::ElementNameSuffixWithoutPrefix);
+    }
+
+    #[test]
+    fn fail_close_element_name_suffix_without_prefix() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementOpenEnd,
+            ElementCloseSuffix("b"),
+        ]);
+
+        assert_error!(&e, Error::ElementCloseSuffixWithoutPrefix);
+    }
+
+    #[test]
     fn fail_attribute_name_empty() {
         let e = ValidatorCore::validate_all(vec![
             ElementOpenStart("a"),
@@ -559,6 +746,25 @@ mod test {
         ]);
 
         assert_error!(&e, Error::AttributeNameEmpty);
+    }
+
+    #[test]
+    fn fail_attribute_name_suffix_empty() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("b"),
+            AttributeStartSuffix(""),
+            ElementSelfClose,
+        ]);
+
+        assert_error!(&e, Error::AttributeNameSuffixEmpty);
+    }
+
+    #[test]
+    fn fail_attribute_suffix_without_prefix() {
+        let e = ValidatorCore::validate_all(vec![ElementOpenStart("a"), AttributeStartSuffix("b")]);
+
+        assert_error!(&e, Error::AttributeNameSuffixWithoutPrefix);
     }
 
     #[test]
@@ -604,6 +810,18 @@ mod test {
     }
 
     #[test]
+    fn fail_mismatched_open_and_close_same_prefix() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            ElementOpenStartSuffix("b"),
+            ElementClose("a"),
+            ElementCloseSuffix("c"),
+        ]);
+
+        assert_error!(&e, Error::ElementOpenAndCloseMismatched { open, close } if open == ("a", "b") && close == ("a", "c"));
+    }
+
+    #[test]
     fn fail_unclosed_open() {
         let e = ValidatorCore::validate_all(vec![ElementOpenStart("a")]);
 
@@ -641,6 +859,22 @@ mod test {
         ]);
 
         assert_error!(&e, Error::AttributeDuplicate { name } if name == "b");
+    }
+
+    #[test]
+    fn may_differ_by_attribute_qname() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("b"),
+            AttributeStartSuffix("x"),
+            AttributeValueLiteral("c"),
+            AttributeStart("b"),
+            AttributeStartSuffix("y"),
+            AttributeValueLiteral("d"),
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
     }
 
     #[test]

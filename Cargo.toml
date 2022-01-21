@@ -20,6 +20,7 @@ members = [
     "string-slab",
     "string-slab/benchmarks",
     "token",
+    "util",
     "validation",
 ]
 
