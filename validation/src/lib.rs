@@ -87,15 +87,9 @@ impl ValidatorCore {
                     return DeclarationOnlyAllowedAtStartSnafu.fail();
                 }
 
-                static VALID_VERSION_STRING: Lazy<Regex> =
-                    Lazy::new(|| Regex::new(r#"^1\.[0-9]+$"#).unwrap());
-
                 let v = v.as_fused_str();
 
-                ensure!(
-                    VALID_VERSION_STRING.is_match(v),
-                    InvalidDeclarationVersionSnafu { version: v }
-                );
+                ensure!(v == "1.0", InvalidDeclarationVersionSnafu { version: v });
             }
 
             DeclarationEncoding(v) => {
@@ -461,6 +455,13 @@ mod test {
         let e = ValidatorCore::validate_all(vec![DeclarationStart("1.a")]);
 
         assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.a");
+    }
+
+    #[test]
+    fn fail_only_declaration_version_1_0() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.1")]);
+
+        assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.1");
     }
 
     #[test]
