@@ -39,6 +39,14 @@ impl Fused for str {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum XmlNsKind {
+    /// `xmlns="..."`
+    Default,
+    /// `xmlns:foo="..."`
+    Named,
+}
+
 #[derive(Debug, Default)]
 struct ValidatorCore {
     arena: CheckedArena,
@@ -49,6 +57,8 @@ struct ValidatorCore {
     pending_element_open_start_name: Option<QNameBuilder<CheckedKey>>,
     pending_element_close_name: Option<QNameBuilder<CheckedKey>>,
     pending_attribute_name: Option<QNameBuilder<CheckedKey>>,
+    is_xmlns: Option<XmlNsKind>,
+    attribute_value_had_content: bool,
 }
 
 impl ValidatorCore {
@@ -64,6 +74,7 @@ impl ValidatorCore {
         K::ElementCloseSuffix: Fused,
         K::AttributeStart: Fused,
         K::AttributeStartSuffix: Fused,
+        K::AttributeValueLiteral: AsRef<str>,
         K::AttributeValueReferenceNamed: Fused,
         K::AttributeValueReferenceDecimal: Fused,
         K::AttributeValueReferenceHex: Fused,
@@ -108,6 +119,8 @@ impl ValidatorCore {
             pending_element_open_start_name,
             pending_element_close_name,
             pending_attribute_name,
+            is_xmlns,
+            attribute_value_had_content,
             ..
         } = self;
 
@@ -197,6 +210,8 @@ impl ValidatorCore {
                 ensure!(!v.is_empty(), AttributeNameEmptySnafu);
 
                 *pending_attribute_name = Some(QNameBuilder::new(arena.intern(v)));
+                *is_xmlns = (v == "xmlns").then(|| XmlNsKind::Default);
+                *attribute_value_had_content = false;
             }
             AttributeStartSuffix(v) => {
                 let v = v.as_fused_str();
@@ -210,7 +225,18 @@ impl ValidatorCore {
                 let local_part = arena.intern(v);
                 let name = pending.push(local_part);
 
+                if let Some(XmlNsKind::Default) = is_xmlns {
+                    *is_xmlns = Some(XmlNsKind::Named);
+                }
+
                 self.finish_attribute_start(name)?;
+            }
+
+            AttributeValueLiteral(v) => {
+                let v = v.as_ref();
+                if !v.is_empty() {
+                    *attribute_value_had_content = true;
+                }
             }
 
             AttributeValueReferenceNamed(v) => {
@@ -219,16 +245,29 @@ impl ValidatorCore {
                     known_entity(v),
                     AttributeValueReferenceNamedUnknownSnafu { text: v }
                 );
+                *attribute_value_had_content = true;
             }
+
             AttributeValueReferenceDecimal(v) => {
                 let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
                 reference_value(v, 10).context(InvalidAttributeValueReferenceDecimalSnafu)?;
+                *attribute_value_had_content = true;
             }
+
             AttributeValueReferenceHex(v) => {
                 let v = v.as_fused_str();
                 // TODO: Avoid performing this transformation at multiple layers
                 reference_value(v, 16).context(InvalidAttributeValueReferenceHexSnafu)?;
+                *attribute_value_had_content = true;
+            }
+
+            AttributeValueEnd => {
+                let is_xmlns = is_xmlns.take();
+                let is_valid = is_xmlns.map_or(true, |v| {
+                    v == XmlNsKind::Default || *attribute_value_had_content
+                });
+                ensure!(is_valid, NamespaceEmptySnafu);
             }
 
             CharData(v) => {
@@ -563,6 +602,8 @@ pub enum Error {
         name: QName<String>,
     },
 
+    NamespaceEmpty,
+
     ProcessingInstructionInvalidName {
         name: String,
     },
@@ -871,6 +912,47 @@ mod test {
             AttributeStart("b"),
             AttributeStartSuffix("y"),
             AttributeValueLiteral("d"),
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
+    }
+
+    #[test]
+    fn fail_namespace_empty() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("xmlns"),
+            AttributeStartSuffix("b"),
+            AttributeStartComplete,
+            AttributeValueEnd,
+        ]);
+
+        assert_error!(&e, Error::NamespaceEmpty);
+    }
+
+    #[test]
+    fn may_have_non_empty_namespace() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("xmlns"),
+            AttributeStartSuffix("b"),
+            AttributeStartComplete,
+            AttributeValueLiteral("uri"),
+            AttributeValueEnd,
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
+    }
+
+    #[test]
+    fn may_have_empty_default_namespace() {
+        let e = ValidatorCore::validate_all(vec![
+            ElementOpenStart("a"),
+            AttributeStart("xmlns"),
+            AttributeStartComplete,
+            AttributeValueEnd,
             ElementSelfClose,
         ]);
 
