@@ -94,7 +94,7 @@ impl ValidatorCore {
 
             DeclarationEncoding(v) => {
                 static VALID_ENCODING_STRING: Lazy<Regex> =
-                    Lazy::new(|| Regex::new(r#"[A-Za-z]([A-Za-z0-9._]|'-')*"#).unwrap());
+                    Lazy::new(|| Regex::new(r#"\A[A-Za-z]([A-Za-z0-9._]|'-')*\z"#).unwrap());
 
                 let v = v.as_fused_str();
 
@@ -466,10 +466,12 @@ mod test {
 
     #[test]
     fn fail_unknown_declaration_encoding() {
-        let e =
-            ValidatorCore::validate_all(vec![DeclarationStart("1.0"), DeclarationEncoding("1")]);
+        let e = ValidatorCore::validate_all(vec![
+            DeclarationStart("1.0"),
+            DeclarationEncoding("UTF-8<"),
+        ]);
 
-        assert_error!(&e, Error::InvalidDeclarationEncoding { encoding } if encoding == "1");
+        assert_error!(&e, Error::InvalidDeclarationEncoding { encoding } if encoding == "UTF-8<");
     }
 
     #[test]
