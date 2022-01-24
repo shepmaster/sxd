@@ -73,6 +73,7 @@ impl ValidatorCore {
                     token,
                     DeclarationStart(_)
                         | ElementOpenStart(_)
+                        | Comment(_)
                         | ProcessingInstructionStart(_)
                         | CharData(_)
                 ),
@@ -669,7 +670,18 @@ mod test {
     }
 
     #[test]
-    fn fail_does_not_start_with_declaration_element_or_processing_instruction() {
+    fn may_start_with_comment() {
+        let e = ValidatorCore::validate_all(vec![
+            Comment(""),
+            ElementOpenStart("element"),
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
+    }
+
+    #[test]
+    fn fail_does_not_start_with_declaration_element_processing_instruction_or_comment() {
         let e = ValidatorCore::validate_all(vec![ReferenceNamed("lt")]);
 
         assert_error!(&e, Error::InvalidStartItem);
