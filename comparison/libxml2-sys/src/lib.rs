@@ -132,6 +132,16 @@ impl Error {
         match error.code as _ {
             ffi::xmlParserErrors_XML_ERR_OK => Ok(()),
 
+            // TODO: While we don't *yet* care about these errors, they should be addressed.
+            ffi::xmlParserErrors_XML_ERR_RESERVED_XML_NAME // `xml:` as an attribute
+                | ffi::xmlParserErrors_XML_WAR_LANG_VALUE // Malformed value for xml:lang
+                | ffi::xmlParserErrors_XML_WAR_NS_URI // Invalid URI
+                | ffi::xmlParserErrors_XML_WAR_NS_URI_RELATIVE
+                | ffi::xmlParserErrors_XML_WAR_SPACE_VALUE // `xml:space` invalid
+                | ffi::xmlParserErrors_XML_NS_ERR_UNDEFINED_NAMESPACE
+                | ffi::xmlParserErrors_XML_DTD_XMLID_VALUE // `xml:id="1"`
+                => Ok(()),
+
             _ => {
                 let message =
                     unsafe { CStr::from_ptr(error.message).to_string_lossy().into_owned() };
