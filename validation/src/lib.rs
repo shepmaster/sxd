@@ -73,6 +73,7 @@ impl ValidatorCore {
                     token,
                     DeclarationStart(_)
                         | ElementOpenStart(_)
+                        | Comment(_)
                         | ProcessingInstructionStart(_)
                         | CharData(_)
                 ),
@@ -86,20 +87,14 @@ impl ValidatorCore {
                     return DeclarationOnlyAllowedAtStartSnafu.fail();
                 }
 
-                static VALID_VERSION_STRING: Lazy<Regex> =
-                    Lazy::new(|| Regex::new(r#"^1\.[0-9]+$"#).unwrap());
-
                 let v = v.as_fused_str();
 
-                ensure!(
-                    VALID_VERSION_STRING.is_match(v),
-                    InvalidDeclarationVersionSnafu { version: v }
-                );
+                ensure!(v == "1.0", InvalidDeclarationVersionSnafu { version: v });
             }
 
             DeclarationEncoding(v) => {
                 static VALID_ENCODING_STRING: Lazy<Regex> =
-                    Lazy::new(|| Regex::new(r#"[A-Za-z]([A-Za-z0-9._]|'-')*"#).unwrap());
+                    Lazy::new(|| Regex::new(r#"\A[A-Za-z]([A-Za-z0-9._]|'-')*\z"#).unwrap());
 
                 let v = v.as_fused_str();
 
@@ -463,11 +458,20 @@ mod test {
     }
 
     #[test]
-    fn fail_unknown_declaration_encoding() {
-        let e =
-            ValidatorCore::validate_all(vec![DeclarationStart("1.0"), DeclarationEncoding("1")]);
+    fn fail_only_declaration_version_1_0() {
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.1")]);
 
-        assert_error!(&e, Error::InvalidDeclarationEncoding { encoding } if encoding == "1");
+        assert_error!(&e, Error::InvalidDeclarationVersion { version } if version == "1.1");
+    }
+
+    #[test]
+    fn fail_unknown_declaration_encoding() {
+        let e = ValidatorCore::validate_all(vec![
+            DeclarationStart("1.0"),
+            DeclarationEncoding("UTF-8<"),
+        ]);
+
+        assert_error!(&e, Error::InvalidDeclarationEncoding { encoding } if encoding == "UTF-8<");
     }
 
     #[test]
@@ -669,7 +673,18 @@ mod test {
     }
 
     #[test]
-    fn fail_does_not_start_with_declaration_element_or_processing_instruction() {
+    fn may_start_with_comment() {
+        let e = ValidatorCore::validate_all(vec![
+            Comment(""),
+            ElementOpenStart("element"),
+            ElementSelfClose,
+        ]);
+
+        assert_ok!(e);
+    }
+
+    #[test]
+    fn fail_does_not_start_with_declaration_element_processing_instruction_or_comment() {
         let e = ValidatorCore::validate_all(vec![ReferenceNamed("lt")]);
 
         assert_error!(&e, Error::InvalidStartItem);

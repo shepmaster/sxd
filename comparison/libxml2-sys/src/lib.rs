@@ -1,5 +1,4 @@
 #![deny(rust_2018_idioms)]
-#![feature(c_variadic)]
 
 use std::{
     convert::TryInto,
@@ -7,7 +6,6 @@ use std::{
     fmt,
     os::raw::{c_char, c_void},
     ptr,
-    sync::Once,
 };
 
 mod ffi {
@@ -21,19 +19,19 @@ mod ffi {
 }
 
 pub fn parse(s: &str) -> Result<String> {
-    one_time_setup();
     Document::parse(s).map(|d| d.to_string())
 }
 
-fn one_time_setup() {
-    unsafe extern "C" fn no_op_error_handler(_ctx: *mut c_void, _msg: *const c_char, _args: ...) {}
+unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *mut ffi::xmlError) {
+    let ctx = ctx as *mut ffi::xmlParserCtxt;
 
-    static START: Once = Once::new();
-
-    START.call_once(|| unsafe {
-        ffi::xmlInitParser();
-        ffi::initGenericErrorDefaultFunc(&mut Some(no_op_error_handler))
-    });
+    if let (Some(ctx), Some(error)) = (ctx.as_ref(), error.as_ref()) {
+        if let Err(error) = Error::from_libxml2(error) {
+            let errors = (*ctx)._private as *mut Errors;
+            let errors = &mut *errors;
+            errors.push(error);
+        }
+    }
 }
 
 struct Document(*mut ffi::_xmlDoc);
@@ -41,21 +39,33 @@ struct Document(*mut ffi::_xmlDoc);
 impl Document {
     fn parse(s: &str) -> Result<Document> {
         if s.contains('\0') {
-            return Err(Error(
-                "libxml2 stops processing at embedded NULs; treating this as a failure".into(),
+            return Err(Error::high_level(
+                "libxml2 stops processing at embedded NULs; treating this as a failure",
             ));
         }
 
         unsafe {
+            let mut errors = Errors::new();
+            let ctx = ffi::xmlNewParserCtxt();
+
+            (*ctx)._private = &mut errors as *mut _ as *mut c_void;
+            ffi::xmlSetStructuredErrorFunc(ctx as _, Some(global_error_handler));
+
             let buf = s.as_ptr() as *const c_char;
             let buf_len = s.len().try_into().expect("Can't fit size");
             let url = ptr::null();
             let encoding = ptr::null();
             let options = ffi::xmlParserOption_XML_PARSE_PEDANTIC as _;
 
-            let doc_ptr = ffi::xmlReadMemory(buf, buf_len, url, encoding, options);
+            let doc_ptr = ffi::xmlCtxtReadMemory(ctx, buf, buf_len, url, encoding, options);
+
+            // NB: memory leak here? ("However the parsed document in ctxt->myDoc is not freed.")
+            ffi::xmlFreeParserCtxt(ctx);
+
+            Error::from_multiple(errors)?;
+
             if doc_ptr.is_null() {
-                Err(Error::expect())
+                Err(Error::high_level("NULL document without an error"))
             } else {
                 Ok(Document(doc_ptr))
             }
@@ -71,8 +81,7 @@ impl fmt::Display for Document {
 
             ffi::xmlDocDumpMemory(self.0, &mut out_str, &mut out_len);
             if out_str.is_null() {
-                let e = Error::expect();
-                writeln!(f, "Unable to display document: {}", e)
+                writeln!(f, "Unable to display document")
             } else {
                 let r = CStr::from_ptr(out_str as *mut c_char)
                     .to_string_lossy()
@@ -94,32 +103,77 @@ impl Drop for Document {
     }
 }
 
+type Errors = Vec<Error>;
+
 #[derive(Debug)]
-pub struct Error(String);
+#[allow(dead_code)]
+pub enum Error {
+    HighLevel {
+        message: String,
+    },
+
+    LibXml2 {
+        domain: i32,
+        code: i32,
+        message: String,
+    },
+
+    Multiple(Errors),
+}
 
 impl Error {
-    fn check() -> Result {
-        unsafe {
-            match ffi::xmlGetLastError().as_ref() {
-                Some(err) => Err(Self(
-                    CStr::from_ptr(err.message).to_string_lossy().into_owned(),
-                )),
-                None => Ok(()),
+    fn high_level(message: impl Into<String>) -> Self {
+        Self::HighLevel {
+            message: message.into(),
+        }
+    }
+
+    fn from_libxml2(error: &ffi::xmlError) -> Result<(), Self> {
+        match error.code as _ {
+            ffi::xmlParserErrors_XML_ERR_OK => Ok(()),
+
+            _ => {
+                let message =
+                    unsafe { CStr::from_ptr(error.message).to_string_lossy().into_owned() };
+
+                Err(Self::LibXml2 {
+                    domain: error.domain,
+                    code: error.code,
+                    message,
+                })
             }
         }
     }
 
-    fn expect() -> Self {
-        match Self::check() {
-            Ok(()) => Self(String::from("Some error occurred but I don't know what")),
-            Err(e) => e,
+    fn from_multiple(errors: Vec<Self>) -> Result<()> {
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::Multiple(errors))
         }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        use Error::*;
+
+        match self {
+            HighLevel { message } => message.fmt(f),
+
+            LibXml2 {
+                domain,
+                code,
+                message,
+            } => write!(f, "{message} ({domain}/{code})"),
+
+            Multiple(errors) => {
+                for e in errors {
+                    e.fmt(f)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

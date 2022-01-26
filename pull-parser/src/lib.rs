@@ -876,6 +876,13 @@ impl CoreParser {
     fn dispatch_initial(&mut self) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
+        // We may enter this dispatch from other dispatch functions
+        // that have advanced the buffer to the end, so we need to
+        // re-check if it is now empty.
+        if self.buffer.complete() {
+            return self.finish().map(|_| None);
+        }
+
         if *self.buffer.consume("<")? {
             if *self.buffer.consume("/")? {
                 self.ratchet(StreamElementCloseName);
@@ -1264,6 +1271,7 @@ impl CoreParser {
         self.ratchet(Initial);
         self.dispatch_initial()
     }
+
     #[inline]
     fn dispatch_stream_reference_named(
         &mut self,
@@ -2348,6 +2356,11 @@ mod test {
                 Comment(Partial("aaaaaaaaaaaa")),
                 Comment(Complete("aaaaaaaa")),
             ]))
+    }
+
+    #[test]
+    fn comment_empty() -> Result {
+        expect("<!---->").to(be_parsed_as([Comment(Complete(""))]))
     }
 
     #[test]
