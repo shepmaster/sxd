@@ -8,8 +8,9 @@ edition = "2021"
 
 [dependencies]
 pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
-token = { package = "sxd-token", path = "../token" }
 string-slab = { package = "sxd-string-slab", path = "../string-slab" }
+token = { package = "sxd-token", path = "../token" }
+util = { package = "sxd-util", path = "../util" }
 
 hashbrown = { version = "0.12.0", default-features = false, features = ["ahash", "inline-more"] }
 once_cell = { version = "1.7.0", default-features = false, features = ["std"] }

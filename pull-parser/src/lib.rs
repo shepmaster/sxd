@@ -382,14 +382,14 @@ impl StringRing {
         unsafe { self.while_bytes(u8::is_ascii_hexdigit) }
     }
 
-    fn name(&mut self) -> Result<Streaming<usize>> {
+    fn ncname(&mut self) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
         let mut c = s.char_indices();
 
         let end_idx = match c
             .next()
-            .filter(|(_, c)| c.is_name_start_char())
+            .filter(|(_, c)| c.is_ncname_start_char())
             .map(|(i, c)| i + c.len_utf8())
         {
             Some(i) => i,
@@ -397,7 +397,7 @@ impl StringRing {
         };
 
         let end_idx = c
-            .take_while(|(_, c)| c.is_name_char())
+            .take_while(|(_, c)| c.is_ncname_char())
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(end_idx);
@@ -409,8 +409,8 @@ impl StringRing {
         }
     }
 
-    fn name_continuation(&mut self) -> Result<Streaming<usize>> {
-        self.while_char(char::is_name_char)
+    fn ncname_continuation(&mut self) -> Result<Streaming<usize>> {
+        self.while_char(char::is_ncname_char)
     }
 
     #[inline]
@@ -474,12 +474,12 @@ pub impl char {
     }
 
     #[inline]
-    fn is_name_start_char_ascii(&self) -> bool {
-        matches!(self, ':' | 'A'..='Z' | '_' | 'a'..='z')
+    fn is_ncname_start_char_ascii(&self) -> bool {
+        matches!(self, 'A'..='Z' | '_' | 'a'..='z')
     }
 
     #[inline]
-    fn is_name_start_char_non_ascii(&self) -> bool {
+    fn is_ncname_start_char_non_ascii(&self) -> bool {
         (matches!(self, '\u{C0}'..='\u{2FF}') && !matches!(self, '\u{D7}' | '\u{F7}'))
             || matches!(
                 self,
@@ -496,20 +496,20 @@ pub impl char {
     }
 
     #[inline]
-    fn is_name_start_char(&self) -> bool {
-        self.is_name_start_char_ascii() || self.is_name_start_char_non_ascii()
+    fn is_ncname_start_char(&self) -> bool {
+        self.is_ncname_start_char_ascii() || self.is_ncname_start_char_non_ascii()
     }
 
     #[inline]
-    fn is_name_non_start_char_ascii(&self) -> bool {
+    fn is_ncname_non_start_char_ascii(&self) -> bool {
         matches!(self, '-' | '.' | '0'..='9')
     }
 
     #[inline]
-    fn is_name_char(&self) -> bool {
-        self.is_name_start_char_ascii()
-            || self.is_name_non_start_char_ascii()
-            || self.is_name_start_char_non_ascii()
+    fn is_ncname_char(&self) -> bool {
+        self.is_ncname_start_char_ascii()
+            || self.is_ncname_non_start_char_ascii()
+            || self.is_ncname_start_char_non_ascii()
             || matches!(self, '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
     }
 }
@@ -559,12 +559,17 @@ enum State {
 
     StreamElementOpenName,
     AfterElementOpenName,
+    StreamElementOpenNameSuffix,
+    AfterElementOpenNameSuffix,
+    AfterElementOpenNameComplete,
     AfterElementOpenNameRequiredSpace,
     AfterElementOpenNameSpace,
 
     StreamAttributeName,
     AfterAttributeName,
-
+    StreamAttributeNameSuffix,
+    AfterAttributeNameSuffix,
+    AfterAttributeNameComplete,
     AfterAttributeNameSpace,
     AfterAttributeNameEquals,
     AfterAttributeNameEqualsSpace,
@@ -578,6 +583,9 @@ enum State {
 
     StreamElementCloseName,
     AfterElementCloseName,
+    StreamElementCloseNameSuffix,
+    AfterElementCloseNameSuffix,
+    AfterElementCloseNameComplete,
     AfterElementCloseNameSpace,
 
     StreamReferenceNamed,
@@ -635,11 +643,50 @@ pub struct CoreParser {
     rollback_to: RollbackState,
 }
 
-macro_rules! dispatch_eq_value {
-    ($k:ident) => {
+macro_rules! dispatch_namespaced_name {
+    ($s:ident, $t:ident) => {
         paste::paste! {
             #[inline]
-            fn [<dispatch_after_ $k>](&mut self) -> Result<Option<IndexToken>> {
+            fn [<dispatch_stream_ $s>](
+                &mut self,
+                f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+            ) -> Result<Option<IndexToken>> {
+                self.stream_from_buffer(f, State::[<After $s:camel>], Token::[<$t:camel>])
+            }
+
+            #[inline]
+            fn [<dispatch_after_ $s>](&mut self) -> Result<Option<IndexToken>> {
+                if *self.buffer.consume(":")? {
+                    self.ratchet(State::[<Stream $s:camel Suffix>]);
+                    self.[<dispatch_stream_ $s _suffix>](StringRing::ncname)
+                } else {
+                    self.ratchet(State::[<After $s:camel Suffix>]);
+                    self.[<dispatch_after_ $s _suffix>]()
+                }
+            }
+
+            #[inline]
+            fn [<dispatch_stream_ $s _suffix>](
+                &mut self,
+                f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+            ) -> Result<Option<IndexToken>> {
+                self.stream_from_buffer(f, State::[<After $s:camel Suffix>], Token::[<$t:camel Suffix>])
+            }
+
+            #[inline]
+            fn [<dispatch_after_ $s _suffix>](&mut self) -> Result<Option<IndexToken>> {
+                self.ratchet(State::[<After $s:camel Complete>]);
+                Ok(Some(Token::[<$t:camel Complete>]))
+            }
+        }
+    }
+}
+
+macro_rules! dispatch_eq_value {
+    ($k:ident $($suffix:ident)?) => {
+        paste::paste! {
+            #[inline]
+            fn [<dispatch_after_ $k $(_ $suffix)?>](&mut self) -> Result<Option<IndexToken>> {
                 self.consume_space(
                     State::[<After $k:camel Space>],
                     Self::[<dispatch_after_ $k _space>],
@@ -789,18 +836,28 @@ impl CoreParser {
             AfterDeclarationStandaloneSpace => self.dispatch_after_declaration_standalone_space(),
 
             StreamElementOpenName => {
-                self.dispatch_stream_element_open_name(StringRing::name_continuation)
+                self.dispatch_stream_element_open_name(StringRing::ncname_continuation)
             }
             AfterElementOpenName => self.dispatch_after_element_open_name(),
+            StreamElementOpenNameSuffix => {
+                self.dispatch_stream_element_open_name_suffix(StringRing::ncname_continuation)
+            }
+            AfterElementOpenNameSuffix => self.dispatch_after_element_open_name_suffix(),
+            AfterElementOpenNameComplete => self.dispatch_after_element_open_name_complete(),
             AfterElementOpenNameRequiredSpace => {
                 self.dispatch_after_element_open_name_required_space()
             }
             AfterElementOpenNameSpace => self.dispatch_after_element_open_name_space(),
 
             StreamAttributeName => {
-                self.dispatch_stream_attribute_name(StringRing::name_continuation)
+                self.dispatch_stream_attribute_name(StringRing::ncname_continuation)
             }
             AfterAttributeName => self.dispatch_after_attribute_name(),
+            StreamAttributeNameSuffix => {
+                self.dispatch_stream_attribute_name_suffix(StringRing::ncname_continuation)
+            }
+            AfterAttributeNameSuffix => self.dispatch_after_attribute_name_suffix(),
+            AfterAttributeNameComplete => self.dispatch_after_attribute_name_complete(),
             AfterAttributeNameSpace => self.dispatch_after_attribute_name_space(),
             AfterAttributeNameEquals => self.dispatch_after_attribute_name_equals(),
             AfterAttributeNameEqualsSpace => self.dispatch_after_attribute_name_equals_space(),
@@ -817,16 +874,21 @@ impl CoreParser {
             StreamAttributeValueReferenceNamed(quote) => self
                 .dispatch_stream_attribute_value_reference_named(
                     quote,
-                    StringRing::name_continuation,
+                    StringRing::ncname_continuation,
                 ),
             AfterAttributeValueReference(quote) => {
                 self.dispatch_after_attribute_value_reference(quote)
             }
 
             StreamElementCloseName => {
-                self.dispatch_stream_element_close_name(StringRing::name_continuation)
+                self.dispatch_stream_element_close_name(StringRing::ncname_continuation)
             }
             AfterElementCloseName => self.dispatch_after_element_close_name(),
+            StreamElementCloseNameSuffix => {
+                self.dispatch_stream_element_close_name_suffix(StringRing::ncname_continuation)
+            }
+            AfterElementCloseNameSuffix => self.dispatch_after_element_close_name_suffix(),
+            AfterElementCloseNameComplete => self.dispatch_after_element_close_name_complete(),
             AfterElementCloseNameSpace => self.dispatch_after_element_close_name_space(),
 
             StreamCharData => self.dispatch_stream_char_data(),
@@ -834,14 +896,14 @@ impl CoreParser {
             AfterCData => self.dispatch_after_cdata(),
 
             StreamReferenceNamed => {
-                self.dispatch_stream_reference_named(StringRing::name_continuation)
+                self.dispatch_stream_reference_named(StringRing::ncname_continuation)
             }
             StreamReferenceDecimal => self.dispatch_stream_reference_decimal(),
             StreamReferenceHex => self.dispatch_stream_reference_hex(),
             AfterReference => self.dispatch_after_reference(),
 
             StreamProcessingInstructionName => {
-                self.dispatch_stream_processing_instruction_name(StringRing::name_continuation)
+                self.dispatch_stream_processing_instruction_name(StringRing::ncname_continuation)
             }
             AfterProcessingInstructionName => self.dispatch_after_processing_instruction_name(),
             AfterProcessingInstructionNameRequiredSpace => {
@@ -886,7 +948,7 @@ impl CoreParser {
         if *self.buffer.consume("<")? {
             if *self.buffer.consume("/")? {
                 self.ratchet(StreamElementCloseName);
-                return self.dispatch_stream_element_close_name(StringRing::name);
+                return self.dispatch_stream_element_close_name(StringRing::ncname);
             }
 
             if *self.buffer.maybe_special_tag_start_char() {
@@ -904,14 +966,15 @@ impl CoreParser {
                         return self.dispatch_after_declaration_open();
                     } else {
                         self.ratchet(StreamProcessingInstructionName);
-                        return self.dispatch_stream_processing_instruction_name(StringRing::name);
+                        return self
+                            .dispatch_stream_processing_instruction_name(StringRing::ncname);
                     }
                 }
             }
 
             // regular open tag
             self.ratchet(StreamElementOpenName);
-            return self.dispatch_stream_element_open_name(StringRing::name);
+            return self.dispatch_stream_element_open_name(StringRing::ncname);
         }
 
         if let Some(v) = self.buffer.first_char_data()? {
@@ -930,7 +993,7 @@ impl CoreParser {
             self.dispatch_stream_reference_decimal()
         } else if *self.buffer.consume("&")? {
             self.ratchet(StreamReferenceNamed);
-            self.dispatch_stream_reference_named(StringRing::name)
+            self.dispatch_stream_reference_named(StringRing::ncname)
         } else {
             let location = self.buffer.absolute_location();
             InvalidXmlSnafu { location }.fail()
@@ -1086,16 +1149,9 @@ impl CoreParser {
         Ok(Some(DeclarationClose))
     }
 
-    #[inline]
-    fn dispatch_stream_element_open_name(
-        &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(f, State::AfterElementOpenName, Token::ElementOpenStart)
-    }
+    dispatch_namespaced_name!(element_open_name, ElementOpenStart);
 
-    #[inline]
-    fn dispatch_after_element_open_name(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_open_name_complete(&mut self) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
         if *self.buffer.consume("/>")? {
@@ -1132,19 +1188,12 @@ impl CoreParser {
             Ok(Some(ElementOpenEnd))
         } else {
             self.ratchet(StreamAttributeName);
-            self.dispatch_stream_attribute_name(StringRing::name)
+            self.dispatch_stream_attribute_name(StringRing::ncname)
         }
     }
 
-    #[inline]
-    fn dispatch_stream_attribute_name(
-        &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(f, State::AfterAttributeName, Token::AttributeStart)
-    }
-
-    dispatch_eq_value!(attribute_name);
+    dispatch_namespaced_name!(attribute_name, AttributeStart);
+    dispatch_eq_value!(attribute_name complete);
 
     fn dispatch_after_attribute_name_equals_space(&mut self) -> Result<Option<IndexToken>> {
         use State::*;
@@ -1159,7 +1208,7 @@ impl CoreParser {
         use {State::*, Token::*};
 
         if *self.buffer.consume(quote)? {
-            self.ratchet(AfterElementOpenName);
+            self.ratchet(AfterElementOpenNameComplete);
             Ok(Some(AttributeValueEnd))
         } else if *self.buffer.consume("&#x")? {
             self.ratchet(StreamAttributeValueReferenceHex(quote));
@@ -1169,7 +1218,7 @@ impl CoreParser {
             self.dispatch_stream_attribute_value_reference_decimal(quote)
         } else if *self.buffer.consume("&")? {
             self.ratchet(StreamAttributeValueReferenceNamed(quote));
-            self.dispatch_stream_attribute_value_reference_named(quote, StringRing::name)
+            self.dispatch_stream_attribute_value_reference_named(quote, StringRing::ncname)
         } else if self.buffer.starts_with("<")? {
             InvalidCharacterInAttributeSnafu {
                 location: self.buffer.absolute_location(),
@@ -1246,16 +1295,10 @@ impl CoreParser {
         Ok(Some(AttributeValueLiteral(value)))
     }
 
-    #[inline]
-    fn dispatch_stream_element_close_name(
-        &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(f, State::AfterElementCloseName, Token::ElementClose)
-    }
+    dispatch_namespaced_name!(element_close_name, ElementClose);
 
     #[inline]
-    fn dispatch_after_element_close_name(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_close_name_complete(&mut self) -> Result<Option<IndexToken>> {
         self.consume_space(
             State::AfterElementCloseNameSpace,
             Self::dispatch_after_element_close_name_space,
@@ -1655,10 +1698,16 @@ macro_rules! fuse_invoke {
             fuse DeclarationStandalone,
             pass DeclarationClose,
             fuse ElementOpenStart,
+            fuse ElementOpenStartSuffix,
+            pass ElementOpenStartComplete,
             pass ElementOpenEnd,
             pass ElementSelfClose,
             fuse ElementClose,
+            fuse ElementCloseSuffix,
+            pass ElementCloseComplete,
             fuse AttributeStart,
+            fuse AttributeStartSuffix,
+            pass AttributeStartComplete,
             stream AttributeValueLiteral,
             fuse AttributeValueReferenceNamed,
             fuse AttributeValueReferenceDecimal,
@@ -2106,6 +2155,7 @@ mod test {
     fn self_closed_element() -> Result {
         expect(r#"<alpha />"#).to(be_parsed_as([
             ElementOpenStart(Complete("alpha")),
+            ElementOpenStartComplete,
             ElementSelfClose,
         ]))
     }
@@ -2117,6 +2167,7 @@ mod test {
             .to(be_parsed_as([
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
+                ElementOpenStartComplete,
                 ElementSelfClose,
             ]))
     }
@@ -2125,7 +2176,9 @@ mod test {
     fn self_closed_element_with_one_attribute() -> Result {
         expect(r#"<alpha a="b"/>"#).to(be_parsed_as([
             ElementOpenStart(Complete("alpha")),
+            ElementOpenStartComplete,
             AttributeStart(Complete("a")),
+            AttributeStartComplete,
             AttributeValueLiteral(Complete("b")),
             AttributeValueEnd,
             ElementSelfClose,
@@ -2139,8 +2192,10 @@ mod test {
             .to(be_parsed_as([
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
+                ElementOpenStartComplete,
                 AttributeStart(Partial("b01234567")),
                 AttributeStart(Complete("890123456789")),
+                AttributeStartComplete,
                 AttributeValueLiteral(Partial("c012345678901234")),
                 AttributeValueLiteral(Complete("56789")),
                 AttributeValueEnd,
@@ -2152,10 +2207,13 @@ mod test {
     fn attributes_with_both_quote_styles() -> Result {
         expect(r#"<alpha a="b" c='d'/>"#).to(be_parsed_as([
             ElementOpenStart(Complete("alpha")),
+            ElementOpenStartComplete,
             AttributeStart(Complete("a")),
+            AttributeStartComplete,
             AttributeValueLiteral(Complete("b")),
             AttributeValueEnd,
             AttributeStart(Complete("c")),
+            AttributeStartComplete,
             AttributeValueLiteral(Complete("d")),
             AttributeValueEnd,
             ElementSelfClose,
@@ -2166,7 +2224,9 @@ mod test {
     fn attribute_with_escaped_less_than_and_ampersand() -> Result {
         expect("<a b='&lt;&amp;' />").to(be_parsed_as([
             ElementOpenStart(Complete("a")),
+            ElementOpenStartComplete,
             AttributeStart(Complete("b")),
+            AttributeStartComplete,
             AttributeValueReferenceNamed(Complete("lt")),
             AttributeValueReferenceNamed(Complete("amp")),
             AttributeValueEnd,
@@ -2178,7 +2238,9 @@ mod test {
     fn attribute_with_references() -> Result {
         expect("<a b='&ten;&#10;&#x10;' />").to(be_parsed_as([
             ElementOpenStart(Complete("a")),
+            ElementOpenStartComplete,
             AttributeStart(Complete("b")),
+            AttributeStartComplete,
             AttributeValueReferenceNamed(Complete("ten")),
             AttributeValueReferenceDecimal(Complete("10")),
             AttributeValueReferenceHex(Complete("10")),
@@ -2191,8 +2253,10 @@ mod test {
     fn element_with_no_children() -> Result {
         expect(r#"<alpha></alpha>"#).to(be_parsed_as([
             ElementOpenStart(Complete("alpha")),
+            ElementOpenStartComplete,
             ElementOpenEnd,
             ElementClose(Complete("alpha")),
+            ElementCloseComplete,
         ]))
     }
 
@@ -2203,9 +2267,11 @@ mod test {
             .to(be_parsed_as([
                 ElementOpenStart(Partial("a01234567890123")),
                 ElementOpenStart(Complete("456789")),
+                ElementOpenStartComplete,
                 ElementOpenEnd,
                 ElementClose(Partial("a012345")),
                 ElementClose(Complete("67890123456789")),
+                ElementCloseComplete,
             ]))
     }
 
@@ -2213,10 +2279,40 @@ mod test {
     fn element_with_one_child() -> Result {
         expect(r#"<alpha><beta /></alpha>"#).to(be_parsed_as([
             ElementOpenStart(Complete("alpha")),
+            ElementOpenStartComplete,
             ElementOpenEnd,
             ElementOpenStart(Complete("beta")),
+            ElementOpenStartComplete,
             ElementSelfClose,
             ElementClose(Complete("alpha")),
+            ElementCloseComplete,
+        ]))
+    }
+
+    #[test]
+    fn element_with_namespaced_name() -> Result {
+        expect(r#"<l:alpha></l:alpha>"#).to(be_parsed_as([
+            ElementOpenStart(Complete("l")),
+            ElementOpenStartSuffix(Complete("alpha")),
+            ElementOpenStartComplete,
+            ElementOpenEnd,
+            ElementClose(Complete("l")),
+            ElementCloseSuffix(Complete("alpha")),
+            ElementCloseComplete,
+        ]))
+    }
+
+    #[test]
+    fn attribute_with_namespaced_name() -> Result {
+        expect(r#"<alpha xmlns:l="sxd" />"#).to(be_parsed_as([
+            ElementOpenStart(Complete("alpha")),
+            ElementOpenStartComplete,
+            AttributeStart(Complete("xmlns")),
+            AttributeStartSuffix(Complete("l")),
+            AttributeStartComplete,
+            AttributeValueLiteral(Complete("sxd")),
+            AttributeValueEnd,
+            ElementSelfClose,
         ]))
     }
 
@@ -2224,9 +2320,11 @@ mod test {
     fn char_data() -> Result {
         expect("<a>b</a>").to(be_parsed_as([
             ElementOpenStart(Complete("a")),
+            ElementOpenStartComplete,
             ElementOpenEnd,
             CharData(Complete("b")),
             ElementClose(Complete("a")),
+            ElementCloseComplete,
         ]))
     }
 
@@ -2236,10 +2334,12 @@ mod test {
             .with(minimum_capacity)
             .to(be_parsed_as([
                 ElementOpenStart(Complete("a")),
+                ElementOpenStartComplete,
                 ElementOpenEnd,
                 CharData(Partial("0123456789012")),
                 CharData(Complete("3456789")),
                 ElementClose(Complete("a")),
+                ElementCloseComplete,
             ]))
     }
 
@@ -2247,9 +2347,11 @@ mod test {
     fn char_data_with_close_square_bracket() -> Result {
         expect("<a>b]</a>").to(be_parsed_as([
             ElementOpenStart(Complete("a")),
+            ElementOpenStartComplete,
             ElementOpenEnd,
             CharData(Complete("b]")),
             ElementClose(Complete("a")),
+            ElementCloseComplete,
         ]))
     }
 
@@ -2278,6 +2380,7 @@ mod test {
         expect("\t <a/>\r\n").to(be_parsed_as([
             CharData(Complete("\t ")),
             ElementOpenStart(Complete("a")),
+            ElementOpenStartComplete,
             ElementSelfClose,
             CharData(Partial("\r\n")),
         ]))
@@ -2288,8 +2391,10 @@ mod test {
         expect("\t <a></a>\r\n").to(be_parsed_as([
             CharData(Complete("\t ")),
             ElementOpenStart(Complete("a")),
+            ElementOpenStartComplete,
             ElementOpenEnd,
             ElementClose(Complete("a")),
+            ElementCloseComplete,
             CharData(Partial("\r\n")),
         ]))
     }
@@ -2418,6 +2523,7 @@ mod test {
             .to(be_parsed_as([
                 ElementOpenStart(Partial("a--------------")),
                 ElementOpenStart(Complete("--")),
+                ElementOpenStartComplete,
                 ElementSelfClose,
             ]))
     }
@@ -2549,6 +2655,7 @@ mod test {
             //           0               1               2               3
             expect(&*input).with(capacity(32)).to(be_parsed_as([
                 ElementOpenStart(Complete("a")),
+                ElementOpenStartComplete,
                 ElementOpenEnd,
             ]))
         }
@@ -2565,7 +2672,9 @@ mod test {
             //           0               1               2               3
             expect(input).with(capacity(32)).to(be_parsed_as([
                 ElementOpenStart(Complete("a")),
+                ElementOpenStartComplete,
                 AttributeStart(Complete("b")),
+                AttributeStartComplete,
                 AttributeValueLiteral(Complete("c")),
                 AttributeValueEnd,
                 ElementSelfClose,
@@ -2584,7 +2693,9 @@ mod test {
             //           0               1               2               3
             expect(input).with(capacity(32)).to(be_parsed_as([
                 ElementOpenStart(Complete("a")),
+                ElementOpenStartComplete,
                 AttributeStart(Complete("b")),
+                AttributeStartComplete,
                 AttributeValueLiteral(Complete("c")),
                 AttributeValueEnd,
                 ElementSelfClose,
@@ -2601,9 +2712,10 @@ mod test {
             let input = "</a                               >";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            expect(input)
-                .with(capacity(32))
-                .to(be_parsed_as([ElementClose(Complete("a"))]))
+            expect(input).with(capacity(32)).to(be_parsed_as([
+                ElementClose(Complete("a")),
+                ElementCloseComplete,
+            ]))
         }
 
         #[test]
@@ -2748,9 +2860,11 @@ mod test {
             let tokens = FuseCore::fuse_all(vec![
                 ElementOpenStart(Partial("aaaaa")),
                 ElementOpenStart(Complete("aaaaa")),
+                ElementOpenStartComplete,
                 AttributeStart(Partial("")),
                 AttributeStart(Partial("bbbbbbbbbb")),
                 AttributeStart(Complete("")),
+                AttributeStartComplete,
                 AttributeValueLiteral(Partial("c")),
                 AttributeValueLiteral(Partial("c")),
                 AttributeValueLiteral(Complete("c")),
@@ -2762,7 +2876,9 @@ mod test {
                 tokens,
                 [
                     FusedToken::ElementOpenStart("aaaaaaaaaa"),
+                    ElementOpenStartComplete,
                     AttributeStart("bbbbbbbbbb"),
+                    AttributeStartComplete,
                     AttributeValueLiteral(Partial("c")),
                     AttributeValueLiteral(Partial("c")),
                     AttributeValueLiteral(Complete("c")),
