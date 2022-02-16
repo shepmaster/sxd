@@ -1,3 +1,5 @@
+use std::mem;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct QName<T> {
     prefix: Option<T>,
@@ -11,6 +13,13 @@ impl<T> QName<T> {
             local_part: f(self.local_part),
         }
     }
+
+    pub fn as_ref(&self) -> QName<&T> {
+        QName {
+            prefix: self.prefix.as_ref(),
+            local_part: &self.local_part,
+        }
+    }
 }
 
 impl<T> PartialEq<str> for QName<T>
@@ -19,6 +28,24 @@ where
 {
     fn eq(&self, other: &str) -> bool {
         self.prefix.is_none() && self.local_part.as_ref() == other
+    }
+}
+
+impl<T> PartialEq<QName<T>> for str
+where
+    T: AsRef<str>,
+{
+    fn eq(&self, other: &QName<T>) -> bool {
+        other == self
+    }
+}
+
+impl<T> PartialEq<QName<T>> for &str
+where
+    T: AsRef<str>,
+{
+    fn eq(&self, other: &QName<T>) -> bool {
+        other == *self
     }
 }
 
@@ -38,6 +65,33 @@ where
 {
     fn eq(&self, other: &(&str, &str)) -> bool {
         *self == other
+    }
+}
+
+impl<'a> From<&'a str> for QName<&'a str> {
+    fn from(other: &'a str) -> Self {
+        Self {
+            prefix: None,
+            local_part: other,
+        }
+    }
+}
+
+impl<'a> From<&'a String> for QName<&'a str> {
+    fn from(other: &'a String) -> Self {
+        Self {
+            prefix: None,
+            local_part: other,
+        }
+    }
+}
+
+impl From<String> for QName<String> {
+    fn from(other: String) -> Self {
+        Self {
+            prefix: None,
+            local_part: other,
+        }
     }
 }
 
@@ -75,6 +129,29 @@ impl<T> QNameBuilder<T> {
         QName {
             prefix: Some(self.0),
             local_part,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct QNameBuilder2<T>([Option<T>; 2]);
+
+impl<T> Default for QNameBuilder2<T> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<T> QNameBuilder2<T> {
+    pub fn push(&mut self, v: T) {
+        self.0.rotate_left(1);
+        self.0[1] = Some(v);
+    }
+
+    pub fn finish(&mut self) -> Option<QName<T>> {
+        match mem::take(&mut self.0) {
+            [prefix, Some(local_part)] => Some(QName { prefix, local_part }),
+            [_, None] => None,
         }
     }
 }
