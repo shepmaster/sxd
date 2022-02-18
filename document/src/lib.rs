@@ -115,6 +115,7 @@ struct CoreStorage {
 
     strings: UnsafeArena,
     elements: thunderdome::Arena<ElementStorage>,
+    attributes: thunderdome::Arena<AttributeStorage>,
     texts: thunderdome::Arena<TextStorage>,
 }
 
@@ -144,6 +145,20 @@ impl CoreStorage {
         };
         f(&mut e);
         ElementIndex(self.elements.insert(e))
+    }
+
+    fn create_attribute_with_parent(
+        &mut self,
+        name: QName<UnsafeKey>,
+        value: UnsafeKey,
+        parent: ElementIndex,
+    ) -> AttributeIndex {
+        let index = self.attributes.insert(AttributeStorage {
+            name,
+            value,
+            parent: Some(parent),
+        });
+        AttributeIndex(index)
     }
 
     fn create_text_with_parent(&mut self, value: String, parent: ElementIndex) -> TextIndex {
@@ -177,6 +192,7 @@ macro_rules! delegate_index {
 
 delegate_index! {
     elements[ElementIndex] -> ElementStorage,
+    attributes[AttributeIndex] -> AttributeStorage,
     texts[TextIndex] -> TextStorage,
 }
 
@@ -184,10 +200,17 @@ delegate_index! {
 struct ElementStorage {
     name: QName<UnsafeKey>,
     parent: Option<ParentIndex>,
-    // Assuming values are mostly short; not extreme number, we care about order
-    // TODO: Should we create an `Attribute` type?
-    attributes: Vec<(QName<UnsafeKey>, UnsafeKey)>,
+    // Assuming we care about order and there's not a huge number
+    attributes: Vec<AttributeIndex>,
     children: Vec<ChildIndex>,
+}
+
+#[derive(Debug)]
+struct AttributeStorage {
+    name: QName<UnsafeKey>,
+    // Assuming values are mostly short
+    value: UnsafeKey,
+    parent: Option<ElementIndex>,
 }
 
 #[derive(Debug)]
@@ -205,6 +228,18 @@ struct ElementIndex(Index);
 impl std::fmt::Debug for ElementIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("ElementIndex")
+            .field(&self.0.generation())
+            .field(&self.0.slot())
+            .finish()
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct AttributeIndex(Index);
+
+impl std::fmt::Debug for AttributeIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AttributeIndex")
             .field(&self.0.generation())
             .field(&self.0.slot())
             .finish()
@@ -401,7 +436,8 @@ impl Document {
                         current_attribute_name.take(),
                         current_attribute_value.take(),
                     ) {
-                        storage[index].attributes.push((name, value))
+                        let attribute = storage.create_attribute_with_parent(name, value, index);
+                        storage[index].attributes.push(attribute);
                     }
                 }
 
@@ -521,9 +557,10 @@ fn one_element<'a>(
         T::ElementOpenStartComplete,
         output,
     );
-    for &(n, v) in &e.attributes {
+    for &a_idx in &e.attributes {
+        let a = &storage[a_idx];
         one_qname(
-            n,
+            a.name,
             storage,
             T::AttributeStart,
             T::AttributeStartSuffix,
@@ -532,7 +569,7 @@ fn one_element<'a>(
         );
 
         // TODO: escaping of things here
-        unsafe { output.push(T::AttributeValueLiteral(storage.strings.as_str(v))) }
+        unsafe { output.push(T::AttributeValueLiteral(storage.strings.as_str(a.value))) }
         output.push(T::AttributeValueEnd);
     }
     match &*e.children {
@@ -697,6 +734,16 @@ impl<'a> ElementRef<'a> {
         })
     }
 
+    fn attributes(&self) -> Vec<AttributeRef<'a>> {
+        self.storage.access(self.index, |_, element| {
+            element
+                .attributes
+                .iter()
+                .map(|&index| (self.storage, index).into())
+                .collect()
+        })
+    }
+
     /// ```rust
     /// todo!("Document unsafety");
     ///
@@ -708,7 +755,9 @@ impl<'a> ElementRef<'a> {
         let attribute_name = attribute_name.into();
         let attribute_name = attribute_name.as_ref().map(AsRef::as_ref);
         self.storage.access(self.index, |storage, element| {
-            element.attributes.iter().find_map(|&(name, value)| {
+            element.attributes.iter().find_map(|&attr| {
+                let AttributeStorage { name, value, .. } = storage[attr];
+
                 let this_name = unsafe { name.map(|v| storage.strings.as_str(v)) };
 
                 (attribute_name == this_name)
@@ -740,6 +789,48 @@ impl Element {
         S: AsRef<str>,
     {
         self.as_ref().attribute_value(attribute_name)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct AttributeRef<'a> {
+    storage: &'a Storage,
+    index: AttributeIndex,
+}
+
+impl<'a> From<(&'a Storage, AttributeIndex)> for AttributeRef<'a> {
+    fn from(other: (&'a Storage, AttributeIndex)) -> Self {
+        let (storage, index) = other;
+        AttributeRef { storage, index }
+    }
+}
+
+impl<'a> AttributeRef<'a> {
+    /// ```rust
+    /// todo!("Document unsafety");
+    ///
+    fn name(&self) -> QName<&'a str> {
+        self.storage.access(self.index, |storage, attribute| {
+            attribute
+                .name
+                .map(|v| unsafe { storage.strings.as_unbound_str(v) })
+        })
+    }
+
+    /// ```rust
+    /// todo!("Document unsafety");
+    ///
+    fn value(&self) -> &'a str {
+        self.storage
+            .access(self.index, |storage, attribute| unsafe {
+                storage.strings.as_unbound_str(attribute.value)
+            })
+    }
+
+    fn parent(&self) -> Option<ElementRef<'a>> {
+        self.storage.access(self.index, |_, attribute| {
+            attribute.parent.map(|e| (self.storage, e).into())
+        })
     }
 }
 
@@ -873,11 +964,24 @@ mod tests {
         }
 
         #[test]
-        fn element_with_one_attribute() -> Result {
+        fn element_with_one_attribute_value() -> Result {
             let doc = Document::from_str(r#"<a b="c" />"#)?;
             let root = doc.root().expect("Root missing");
 
             assert_eq!(Some("c"), root.attribute_value("b"));
+
+            Ok(())
+        }
+
+        #[test]
+        fn element_with_one_attribute() -> Result {
+            let doc = Document::from_str(r#"<a b="c" />"#)?;
+            let root = doc.root().expect("Root missing");
+
+            let attr = root.attributes().pop().expect("Attribute missing");
+            assert_eq!("b", attr.name());
+            assert_eq!("c", attr.value());
+            assert_eq!(Some(root), attr.parent());
 
             Ok(())
         }
