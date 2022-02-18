@@ -1,12 +1,15 @@
 #![deny(rust_2018_idioms)]
+// Ouroboros uses `.await` internally
+#![allow(clippy::await_holding_refcell_ref)]
 #![allow(dead_code)] // TODO: clean up the API
 
 use pull_parser::Parser;
 use snafu::Snafu;
 use std::{
-    cell::RefCell,
+    cell::{Ref, RefCell},
     convert::{TryFrom, TryInto},
-    mem, ops,
+    mem,
+    ops::{self, Deref},
     rc::Rc,
     str::FromStr,
     vec,
@@ -66,6 +69,18 @@ impl Storage {
         let thing = &storage[index];
         f(&storage, thing)
     }
+
+    fn ref_str(
+        &self,
+        str_builder: impl for<'a> FnOnce(&'a Ref<'a, CoreStorage>) -> &'a str,
+    ) -> StorageStr {
+        StorageStrBuilder {
+            storage: self.clone(),
+            the_ref_builder: |s| s.0.borrow(),
+            str_builder,
+        }
+        .build()
+    }
 }
 
 impl PartialEq for Storage {
@@ -75,6 +90,24 @@ impl PartialEq for Storage {
 }
 
 impl Eq for Storage {}
+
+#[ouroboros::self_referencing]
+struct StorageStr {
+    storage: Storage,
+    #[borrows(storage)]
+    #[covariant]
+    the_ref: Ref<'this, CoreStorage>,
+    #[borrows(the_ref)]
+    str: &'this str,
+}
+
+impl Deref for StorageStr {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.borrow_str()
+    }
+}
 
 #[derive(Debug, Default)]
 struct CoreStorage {
