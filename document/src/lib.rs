@@ -117,6 +117,7 @@ struct CoreStorage {
     elements: thunderdome::Arena<ElementStorage>,
     attributes: thunderdome::Arena<AttributeStorage>,
     texts: thunderdome::Arena<TextStorage>,
+    comments: thunderdome::Arena<CommentStorage>,
 }
 
 impl CoreStorage {
@@ -168,6 +169,14 @@ impl CoreStorage {
         });
         TextIndex(index)
     }
+
+    fn create_comment_with_parent(&mut self, value: String, parent: ParentIndex) -> CommentIndex {
+        let index = self.comments.insert(CommentStorage {
+            value,
+            parent: Some(parent),
+        });
+        CommentIndex(index)
+    }
 }
 
 macro_rules! delegate_index {
@@ -194,6 +203,7 @@ delegate_index! {
     elements[ElementIndex] -> ElementStorage,
     attributes[AttributeIndex] -> AttributeStorage,
     texts[TextIndex] -> TextStorage,
+    comments[CommentIndex] -> CommentStorage,
 }
 
 #[derive(Debug)]
@@ -217,6 +227,12 @@ struct AttributeStorage {
 struct TextStorage {
     value: String,
     parent: Option<ElementIndex>,
+}
+
+#[derive(Debug)]
+struct CommentStorage {
+    value: String,
+    parent: Option<ParentIndex>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -252,6 +268,18 @@ struct TextIndex(Index);
 impl std::fmt::Debug for TextIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("TextIndex")
+            .field(&self.0.generation())
+            .field(&self.0.slot())
+            .finish()
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct CommentIndex(Index);
+
+impl std::fmt::Debug for CommentIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CommentIndex")
             .field(&self.0.generation())
             .field(&self.0.slot())
             .finish()
@@ -316,6 +344,7 @@ index_enum! {
     enum ChildIndex {
         Element(ElementIndex),
         Text(TextIndex),
+        Comment(CommentIndex),
     }
 }
 
@@ -367,6 +396,7 @@ impl Document {
         let mut current_attribute_value = None;
 
         let mut chardata = String::new();
+        let mut comment = String::new();
         let mut qname = QNameBuilder2::default();
 
         while let Some(token) = validator.next_str() {
@@ -463,7 +493,22 @@ impl Document {
                 ProcessingInstructionValue(_) => todo!(),
                 ProcessingInstructionEnd => todo!(),
 
-                Comment(_) => todo!(),
+                Comment(text) => {
+                    match text {
+                        Streaming::Partial(text) => comment.push_str(text),
+                        Streaming::Complete(text) => {
+                            comment.push_str(text);
+                            let comment = mem::take(&mut comment);
+
+                            // TODO: top-level
+                            if let Some(index) = elements.last().copied() {
+                                let comment =
+                                    storage.create_comment_with_parent(comment, index.into());
+                                storage[index].children.push(comment.into())
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -581,6 +626,7 @@ fn one_element<'a>(
                 match c {
                     ChildIndex::Element(e) => one_element(storage, e, output),
                     ChildIndex::Text(t) => one_text(storage, t, output),
+                    ChildIndex::Comment(_) => todo!(),
                 }
             }
 
@@ -859,6 +905,31 @@ impl<'a> TextRef<'a> {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct CommentRef<'a> {
+    storage: &'a Storage,
+    index: CommentIndex,
+}
+
+impl<'a> From<(&'a Storage, CommentIndex)> for CommentRef<'a> {
+    fn from(other: (&'a Storage, CommentIndex)) -> Self {
+        let (storage, index) = other;
+        CommentRef { storage, index }
+    }
+}
+
+impl<'a> CommentRef<'a> {
+    fn value(&self) -> impl Deref<Target = str> {
+        self.storage.ref_str(|the_ref| &the_ref[self.index].value)
+    }
+
+    fn parent(&self) -> Option<ParentRef<'a>> {
+        self.storage.access(self.index, |_, comment| {
+            comment.parent.map(|index| (self.storage, index).into())
+        })
+    }
+}
+
 macro_rules! ref_enum {
     (#[index = $indextype:ident]
      enum $name:ident<'a> {
@@ -925,6 +996,7 @@ ref_enum! {
     enum ChildRef<'a> {
         Element(ElementRef<'a>),
         Text(TextRef<'a>),
+        Comment(CommentRef<'a>),
     }
 }
 
@@ -999,6 +1071,23 @@ mod tests {
                 .expect("Not text");
             assert_eq!("hello", &*text.value());
             assert_eq!(Some(root), text.parent());
+
+            Ok(())
+        }
+
+        #[test]
+        fn element_with_comment() -> Result {
+            let doc = Document::from_str(r#"<a><!-- hello --></a>"#)?;
+            let root = doc.root().expect("Root missing");
+
+            let comment: CommentRef<'_> = root
+                .children()
+                .pop()
+                .expect("Comment missing")
+                .try_into()
+                .expect("Not a comment");
+            assert_eq!(" hello ", &*comment.value());
+            assert_eq!(Some(root.into()), comment.parent());
 
             Ok(())
         }
