@@ -111,7 +111,9 @@ impl Deref for StorageStr {
 
 #[derive(Debug, Default)]
 struct CoreStorage {
+    preamble: Vec<CommentIndex>,
     root: Option<ElementIndex>,
+    postamble: Vec<CommentIndex>,
 
     strings: UnsafeArena,
     elements: thunderdome::Arena<ElementStorage>,
@@ -348,6 +350,13 @@ index_enum! {
     }
 }
 
+index_enum! {
+    enum DocumentChildIndex {
+        Element(ElementIndex),
+        Comment(CommentIndex),
+    }
+}
+
 // TODO: move methods to here from `Document`
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct DocumentRef<'a> {
@@ -493,22 +502,27 @@ impl Document {
                 ProcessingInstructionValue(_) => todo!(),
                 ProcessingInstructionEnd => todo!(),
 
-                Comment(text) => {
-                    match text {
-                        Streaming::Partial(text) => comment.push_str(text),
-                        Streaming::Complete(text) => {
-                            comment.push_str(text);
-                            let comment = mem::take(&mut comment);
+                Comment(text) => match text {
+                    Streaming::Partial(text) => comment.push_str(text),
+                    Streaming::Complete(text) => {
+                        comment.push_str(text);
+                        let comment = mem::take(&mut comment);
 
-                            // TODO: top-level
-                            if let Some(index) = elements.last().copied() {
-                                let comment =
-                                    storage.create_comment_with_parent(comment, index.into());
-                                storage[index].children.push(comment.into())
-                            }
+                        if let Some(index) = elements.last().copied() {
+                            let comment = storage.create_comment_with_parent(comment, index.into());
+                            storage[index].children.push(comment.into())
+                        } else {
+                            let comment =
+                                storage.create_comment_with_parent(comment, ParentIndex::DOCUMENT);
+                            let location = if storage.root.is_none() {
+                                &mut storage.preamble
+                            } else {
+                                &mut storage.postamble
+                            };
+                            location.push(comment);
                         }
                     }
-                }
+                },
             }
         }
 
@@ -533,6 +547,28 @@ impl Document {
         let name = storage.strings.intern_qname(name);
         let index = storage.create_element(name);
         (&self.storage, index).into()
+    }
+
+    fn children(&self) -> Vec<DocumentChildRef<'_>> {
+        let storage = self.storage.0.borrow();
+        let CoreStorage {
+            preamble,
+            root,
+            postamble,
+            ..
+        } = &*storage;
+
+        let preamble = preamble
+            .iter()
+            .map(|&index| CommentRef::from((&self.storage, index)).into());
+        let root = root
+            .iter()
+            .map(|&index| ElementRef::from((&self.storage, index)).into());
+        let postamble = postamble
+            .iter()
+            .map(|&index| CommentRef::from((&self.storage, index)).into());
+
+        preamble.chain(root).chain(postamble).collect()
     }
 
     fn root(&self) -> Option<ElementRef<'_>> {
@@ -1000,6 +1036,14 @@ ref_enum! {
     }
 }
 
+ref_enum! {
+    #[index = DocumentChildIndex]
+    enum DocumentChildRef<'a> {
+        Element(ElementRef<'a>),
+        Comment(CommentRef<'a>),
+    }
+}
+
 #[derive(Debug, Snafu)]
 struct InvalidType<T> {
     original: T,
@@ -1088,6 +1132,25 @@ mod tests {
                 .expect("Not a comment");
             assert_eq!(" hello ", &*comment.value());
             assert_eq!(Some(root.into()), comment.parent());
+
+            Ok(())
+        }
+
+        #[test]
+        fn top_level_comments() -> Result {
+            let doc = Document::from_str(r#"<!--pre--><a /><!--post-->"#)?;
+
+            let children = doc.children();
+            let pre_comment: CommentRef<'_> =
+                children.first().copied().unwrap().try_into().unwrap();
+            let post_comment: CommentRef<'_> =
+                children.last().copied().unwrap().try_into().unwrap();
+
+            assert_eq!("pre", &*pre_comment.value());
+            assert_eq!(Some(doc.as_ref().into()), pre_comment.parent());
+
+            assert_eq!("post", &*post_comment.value());
+            assert_eq!(Some(doc.as_ref().into()), post_comment.parent());
 
             Ok(())
         }
