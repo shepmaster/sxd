@@ -15,3 +15,6 @@ validation = { package = "sxd-validation", path = "../validation" }
 snafu = "0.7"
 thunderdome = { version = "0.5.0", default-features = false }
 ouroboros = { version = "0.15.0", default-features = false }
+
+[dev-dependencies]
+proptest = "1.0.0"

@@ -164,20 +164,188 @@ impl CoreStorage {
         AttributeIndex(index)
     }
 
+    fn create_text(&mut self, value: String) -> TextIndex {
+        self.create_text_with(value, |_| {})
+    }
+
     fn create_text_with_parent(&mut self, value: String, parent: ElementIndex) -> TextIndex {
-        let index = self.texts.insert(TextStorage {
+        self.create_text_with(value, |t| t.parent = Some(parent))
+    }
+
+    fn create_text_with(&mut self, value: String, f: impl FnOnce(&mut TextStorage)) -> TextIndex {
+        let mut c = TextStorage {
             value,
-            parent: Some(parent),
-        });
-        TextIndex(index)
+            parent: None,
+        };
+        f(&mut c);
+        TextIndex(self.texts.insert(c))
+    }
+
+    fn create_comment(&mut self, value: String) -> CommentIndex {
+        self.create_comment_with(value, |_| {})
     }
 
     fn create_comment_with_parent(&mut self, value: String, parent: ParentIndex) -> CommentIndex {
-        let index = self.comments.insert(CommentStorage {
+        self.create_comment_with(value, |c| c.parent = Some(parent))
+    }
+
+    fn create_comment_with(
+        &mut self,
+        value: String,
+        f: impl FnOnce(&mut CommentStorage),
+    ) -> CommentIndex {
+        let mut c = CommentStorage {
             value,
-            parent: Some(parent),
-        });
-        CommentIndex(index)
+            parent: None,
+        };
+        f(&mut c);
+        CommentIndex(self.comments.insert(c))
+    }
+
+    fn document_set_root(&mut self, index: ElementIndex) {
+        self.element_change_parent_to(index, ParentIndex::DOCUMENT);
+        if let Some(old_root) = self.root.replace(index) {
+            self[old_root].parent = None;
+        }
+    }
+
+    fn document_append_child(&mut self, child: DocumentChildIndex) {
+        match child {
+            DocumentChildIndex::Element(e) => self.document_set_root(e),
+            DocumentChildIndex::Comment(c) => {
+                self.comment_change_parent_to(c, ParentIndex::DOCUMENT);
+                self.document_append_misc_child(c)
+            }
+        }
+    }
+
+    fn document_append_misc_child(&mut self, child: CommentIndex) {
+        let location = if self.root.is_none() {
+            &mut self.preamble
+        } else {
+            &mut self.postamble
+        };
+        location.push(child);
+    }
+
+    fn element_append_child(&mut self, index: ElementIndex, child: ChildIndex) {
+        self.child_change_parent_to(child, index);
+        self[index].children.push(child);
+    }
+
+    fn element_set_attribute<S>(
+        &mut self,
+        index: ElementIndex,
+        name: QName<S>,
+        value: &str,
+    ) -> AttributeIndex
+    where
+        S: AsRef<str>,
+    {
+        let name = self.strings.intern_qname(name);
+        let value = self.strings.intern(value);
+
+        let attr = self.create_attribute_with_parent(name, value, index);
+        self[index].attributes.push(attr);
+
+        attr
+    }
+
+    fn element_change_parent_to(&mut self, index: ElementIndex, parent: ParentIndex) {
+        let element = &mut self[index];
+
+        let old_parent = element.parent.replace(parent);
+        if let Some(old_parent) = old_parent {
+            self.parent_remove_child(old_parent, index);
+        }
+    }
+
+    fn text_change_parent_to(&mut self, index: TextIndex, parent: ElementIndex) {
+        let text = &mut self[index];
+
+        let old_parent = text.parent.replace(parent);
+        if let Some(old_parent) = old_parent {
+            self.element_remove_child(old_parent, index);
+        }
+    }
+
+    fn comment_change_parent_to(&mut self, index: CommentIndex, parent: ParentIndex) {
+        let comment = &mut self[index];
+
+        let old_parent = comment.parent.replace(parent);
+        if let Some(old_parent) = old_parent {
+            self.parent_remove_child(old_parent, index);
+        }
+    }
+
+    fn child_change_parent_to(&mut self, index: ChildIndex, parent: ElementIndex) {
+        match index {
+            ChildIndex::Element(e) => self.element_change_parent_to(e, parent.into()),
+            ChildIndex::Text(t) => self.text_change_parent_to(t, parent),
+            ChildIndex::Comment(c) => self.comment_change_parent_to(c, parent.into()),
+        }
+    }
+
+    fn document_remove_child(&mut self, child: DocumentChildIndex) {
+        match child {
+            DocumentChildIndex::Element(_) => self.root = None,
+            DocumentChildIndex::Comment(c) => {
+                self.preamble.retain(|&child| child != c);
+                self.postamble.retain(|&child| child != c);
+            }
+        }
+    }
+
+    fn element_remove_child(&mut self, index: ElementIndex, child: impl Into<ChildIndex>) {
+        let child = child.into();
+        let old_parent_element = &mut self[index];
+        old_parent_element.children.retain(|&c| child != c)
+    }
+
+    fn parent_remove_child(&mut self, parent: ParentIndex, child: impl Into<DocumentChildIndex>) {
+        let child = child.into();
+
+        match parent {
+            ParentIndex::Document(DocumentIndex) => self.document_remove_child(child),
+            ParentIndex::Element(parent) => self.element_remove_child(parent, child),
+        }
+    }
+
+    fn iter_elements(
+        &self,
+    ) -> impl Iterator<Item = (ElementIndex, &ElementStorage)> + ExactSizeIterator {
+        self.elements.iter().map(|(i, e)| (ElementIndex(i), e))
+    }
+
+    fn iter_attributes(
+        &self,
+    ) -> impl Iterator<Item = (AttributeIndex, &AttributeStorage)> + ExactSizeIterator {
+        self.attributes.iter().map(|(i, a)| (AttributeIndex(i), a))
+    }
+
+    fn iter_texts(&self) -> impl Iterator<Item = (TextIndex, &TextStorage)> + ExactSizeIterator {
+        self.texts.iter().map(|(i, t)| (TextIndex(i), t))
+    }
+
+    fn iter_comments(
+        &self,
+    ) -> impl Iterator<Item = (CommentIndex, &CommentStorage)> + ExactSizeIterator {
+        self.comments.iter().map(|(i, c)| (CommentIndex(i), c))
+    }
+
+    fn iter_document_children(&self) -> impl Iterator<Item = DocumentChildIndex> + '_ {
+        let Self {
+            preamble,
+            root,
+            postamble,
+            ..
+        } = self;
+
+        let preamble = preamble.iter().copied().map(Into::into);
+        let root = root.iter().copied().map(Into::into);
+        let postamble = postamble.iter().copied().map(Into::into);
+
+        preamble.chain(root).chain(postamble)
     }
 }
 
@@ -350,6 +518,15 @@ index_enum! {
     }
 }
 
+impl From<DocumentChildIndex> for ChildIndex {
+    fn from(other: DocumentChildIndex) -> Self {
+        match other {
+            DocumentChildIndex::Element(e) => ChildIndex::Element(e),
+            DocumentChildIndex::Comment(c) => ChildIndex::Comment(c),
+        }
+    }
+}
+
 index_enum! {
     enum DocumentChildIndex {
         Element(ElementIndex),
@@ -514,12 +691,7 @@ impl Document {
                         } else {
                             let comment =
                                 storage.create_comment_with_parent(comment, ParentIndex::DOCUMENT);
-                            let location = if storage.root.is_none() {
-                                &mut storage.preamble
-                            } else {
-                                &mut storage.postamble
-                            };
-                            location.push(comment);
+                            storage.document_append_misc_child(comment);
                         }
                     }
                 },
@@ -549,26 +721,24 @@ impl Document {
         (&self.storage, index).into()
     }
 
+    fn create_text(&self, value: impl Into<String>) -> TextRef<'_> {
+        let mut storage = self.storage.0.borrow_mut();
+        let index = storage.create_text(value.into());
+        (&self.storage, index).into()
+    }
+
+    fn create_comment(&self, value: impl Into<String>) -> CommentRef<'_> {
+        let mut storage = self.storage.0.borrow_mut();
+        let index = storage.create_comment(value.into());
+        (&self.storage, index).into()
+    }
+
     fn children(&self) -> Vec<DocumentChildRef<'_>> {
         let storage = self.storage.0.borrow();
-        let CoreStorage {
-            preamble,
-            root,
-            postamble,
-            ..
-        } = &*storage;
-
-        let preamble = preamble
-            .iter()
-            .map(|&index| CommentRef::from((&self.storage, index)).into());
-        let root = root
-            .iter()
-            .map(|&index| ElementRef::from((&self.storage, index)).into());
-        let postamble = postamble
-            .iter()
-            .map(|&index| CommentRef::from((&self.storage, index)).into());
-
-        preamble.chain(root).chain(postamble).collect()
+        storage
+            .iter_document_children()
+            .map(|i| (&self.storage, i).into())
+            .collect()
     }
 
     fn root(&self) -> Option<ElementRef<'_>> {
@@ -579,10 +749,19 @@ impl Document {
     // TODO: What happens when we cross between documents?
     fn set_root(&self, element: ElementRef<'_>) {
         if self.storage == *element.storage {
-            element.change_parent_to(ParentIndex::DOCUMENT);
-
             let mut storage = self.storage.0.borrow_mut();
-            storage.root = Some(element.index)
+            storage.document_set_root(element.index)
+        }
+    }
+
+    // TODO: What happens when we cross between documents?
+    // NB: appending a second element will replace the root, not append
+    // NB: previous root will have no parent
+    fn append_child<'z>(&self, child: impl Into<DocumentChildRef<'z>>) {
+        let child = child.into();
+        if self.storage == *child.storage() {
+            let mut storage = self.storage.0.borrow_mut();
+            storage.document_append_child(child.index());
         }
     }
 
@@ -762,37 +941,13 @@ impl<'a> ElementRef<'a> {
         })
     }
 
-    /// Removes this element from the old parents, but does not add it
-    /// to the new parent.
-    ///
-    /// The caller is responsible for deciding *where* it is
-    /// appropriate to place the child.
-    fn change_parent_to(&self, parent: ParentIndex) {
-        let old_parent = self.access_mut(|_, element| element.parent.replace(parent));
-
-        if let Some(old_parent) = old_parent {
-            let mut storage = self.storage.0.borrow_mut();
-
-            match old_parent {
-                ParentIndex::Document(DocumentIndex) => {
-                    storage.root = None;
-                }
-                ParentIndex::Element(old_parent_index) => {
-                    let old_parent_element = &mut storage[old_parent_index];
-                    old_parent_element.children.retain(|&c| c != self.index)
-                }
-            }
-        }
-    }
-
     // TODO: What happens when we cross between documents?
-    fn append_child(&self, child: ElementRef<'a>) {
-        if self.storage == child.storage {
-            child.change_parent_to(self.index.into());
+    fn append_child<'z>(&self, child: impl Into<ChildRef<'z>>) {
+        let child = child.into();
 
-            self.access_mut(|_, element| {
-                element.children.push(child.index.into());
-            });
+        if self.storage == child.storage() {
+            let mut storage = self.storage.0.borrow_mut();
+            storage.element_append_child(self.index, child.index());
         }
     }
 
@@ -814,6 +969,18 @@ impl<'a> ElementRef<'a> {
             let name = strings.intern_qname(name);
             element.name = name;
         })
+    }
+
+    fn set_attribute<Q, S>(&self, name: Q, value: &str) -> AttributeRef<'a>
+    where
+        Q: Into<QName<S>>,
+        S: AsRef<str>,
+    {
+        let name = name.into();
+
+        let mut storage = self.storage.0.borrow_mut();
+        let index = storage.element_set_attribute(self.index, name, value);
+        (self.storage, index).into()
     }
 
     fn attributes(&self) -> Vec<AttributeRef<'a>> {
@@ -861,8 +1028,20 @@ impl Element {
         (storage, index).into()
     }
 
+    fn parent(&self) -> Option<ParentRef<'_>> {
+        self.as_ref().parent()
+    }
+
     fn name(&self) -> QName<&str> {
         self.as_ref().name()
+    }
+
+    fn set_attribute<Q, S>(&self, name: Q, value: &str) -> AttributeRef<'_>
+    where
+        Q: Into<QName<S>>,
+        S: AsRef<str>,
+    {
+        self.as_ref().set_attribute(name, value)
     }
 
     fn attribute_value<Q, S>(&self, attribute_name: Q) -> Option<&str>
@@ -871,6 +1050,10 @@ impl Element {
         S: AsRef<str>,
     {
         self.as_ref().attribute_value(attribute_name)
+    }
+
+    fn append_child<'a>(&self, child: impl Into<ChildRef<'a>>) {
+        self.as_ref().append_child(child)
     }
 }
 
@@ -974,6 +1157,20 @@ macro_rules! ref_enum {
         #[derive(Debug, Copy, Clone, PartialEq, Eq)]
         enum $name<'a> {
             $($vname($vtype<'a>),)*
+        }
+
+        impl<'a> $name<'a> {
+            fn storage(&self) -> &'a Storage {
+                match self {
+                    $($name::$vname(v) => v.storage,)*
+                }
+            }
+
+            fn index(&self) -> $indextype {
+                match self {
+                    $($name::$vname(v) => v.index.into(),)*
+                }
+            }
         }
 
         $(
@@ -1173,6 +1370,39 @@ mod tests {
     }
 
     #[test]
+    fn replacing_the_root_element() {
+        let doc = Document::new();
+        let root1 = doc.create_element("alpha");
+        let root2 = doc.create_element("beta");
+
+        doc.set_root(root1);
+        doc.set_root(root2);
+
+        assert_eq!(doc.children(), [root2]);
+
+        assert_eq!(root1.parent(), None);
+        assert_eq!(root2.parent(), Some(doc.as_ref().into()));
+    }
+
+    #[test]
+    fn moving_comment_from_document_to_element() {
+        let doc = Document::new();
+        let root = doc.create_element("alpha");
+        let comm = doc.create_comment("comment");
+
+        doc.append_child(comm);
+        doc.append_child(root);
+
+        root.append_child(comm);
+
+        assert_eq!(doc.children(), [root]);
+        assert_eq!(root.children(), [comm]);
+
+        assert_eq!(root.parent(), Some(doc.as_ref().into()));
+        assert_eq!(comm.parent(), Some(root.into()));
+    }
+
+    #[test]
     fn reparenting_an_element() {
         let doc = Document::new();
 
@@ -1205,5 +1435,242 @@ mod tests {
 
         element.set_name("beta");
         assert_eq!("beta", element.name());
+    }
+
+    mod property {
+        use super::*;
+        use proptest::{prelude::*, test_runner::TestCaseResult};
+
+        #[derive(Debug, Clone)]
+        enum ConstructionCommand {
+            AppendElement(String),        // TODO namespaces
+            SetAttribute(String, String), // TODO namespaces
+            AppendText(String),
+            AppendComment(String),
+            NavigateUp,
+            RandomlyRefocus(usize),
+            MoveElementHere(usize),
+            MoveTextHere(usize),
+            MoveCommentHere(usize),
+        }
+
+        fn name() -> impl Strategy<Value = String> {
+            any::<u8>().prop_map(|v| format!("name{v:03}"))
+        }
+
+        fn construction_command() -> impl Strategy<Value = ConstructionCommand> {
+            use ConstructionCommand::*;
+            prop_oneof![
+                name().prop_map(AppendElement),
+                (name(), any::<String>()).prop_map(|(a, b)| SetAttribute(a, b)),
+                any::<String>().prop_map(AppendText),
+                any::<String>().prop_map(AppendComment),
+                Just(NavigateUp),
+                any::<usize>().prop_map(RandomlyRefocus),
+                any::<usize>().prop_map(MoveElementHere),
+                any::<usize>().prop_map(MoveTextHere),
+                any::<usize>().prop_map(MoveCommentHere),
+            ]
+        }
+
+        fn build(commands: impl IntoIterator<Item = ConstructionCommand>) -> Document {
+            let doc = Document::new();
+
+            fn selected_item<I>(mut i: I, idx: usize) -> Option<I::Item>
+            where
+                I: ExactSizeIterator,
+            {
+                if i.len() == 0 {
+                    None
+                } else {
+                    i.nth(idx % i.len())
+                }
+            }
+
+            let random_element = |outer_storage, idx| {
+                let storage = doc.storage.0.borrow();
+
+                selected_item(storage.iter_elements(), idx)
+                    .map(|(i, _)| ElementRef::from((outer_storage, i)))
+            };
+
+            let random_text = |outer_storage, idx| {
+                let storage = doc.storage.0.borrow();
+
+                selected_item(storage.iter_texts(), idx)
+                    .map(|(i, _)| TextRef::from((outer_storage, i)))
+            };
+
+            let random_comment = |outer_storage, idx| {
+                let storage = doc.storage.0.borrow();
+
+                selected_item(storage.iter_comments(), idx)
+                    .map(|(i, _)| CommentRef::from((outer_storage, i)))
+            };
+
+            let mut focus: Option<Element> = None;
+
+            for command in commands {
+                use ConstructionCommand::*;
+
+                match command {
+                    AppendElement(name) => {
+                        let e = doc.create_element(name);
+                        match focus {
+                            Some(focus) => focus.append_child(e),
+                            None => doc.set_root(e),
+                        }
+                        focus = Some(e.to_owned());
+                    }
+                    SetAttribute(name, value) => {
+                        if let Some(focus) = &focus {
+                            focus.set_attribute(name, &value);
+                        }
+                    }
+                    AppendText(value) => {
+                        if let Some(focus) = &focus {
+                            let node = doc.create_text(value);
+                            focus.append_child(node);
+                        }
+                    }
+                    AppendComment(value) => {
+                        let node = doc.create_comment(value);
+                        match &focus {
+                            Some(focus) => focus.append_child(node),
+                            None => doc.append_child(node),
+                        }
+                    }
+                    NavigateUp => {
+                        focus = focus
+                            .as_ref()
+                            .and_then(|e| ElementRef::try_from(e.parent()?).ok())
+                            .map(ElementRef::to_owned)
+                    }
+                    RandomlyRefocus(idx) => {
+                        focus = random_element(&doc.storage, idx).map(ElementRef::to_owned);
+                    }
+                    MoveElementHere(idx) => {
+                        if let Some(child) = random_element(&doc.storage, idx) {
+                            match &focus {
+                                Some(parent) => parent.append_child(child),
+                                None => doc.append_child(child),
+                            }
+                        }
+                    }
+                    MoveTextHere(idx) => {
+                        if let Some(child) = random_text(&doc.storage, idx) {
+                            if let Some(parent) = &focus {
+                                parent.append_child(child);
+                            }
+                        }
+                    }
+                    MoveCommentHere(idx) => {
+                        if let Some(child) = random_comment(&doc.storage, idx) {
+                            match &focus {
+                                Some(parent) => parent.append_child(child),
+                                None => doc.append_child(child),
+                            }
+                        }
+                    }
+                }
+            }
+
+            doc
+        }
+
+        // Property: child / parent relationships reflect each other
+        fn parents_know_of_their_children_and_vice_versa_core(doc: Document) -> TestCaseResult {
+            let storage = doc.storage.0.borrow();
+
+            // Every element's parent has that element as a child
+            for (i, e) in storage.iter_elements() {
+                if let Some(p) = e.parent {
+                    match p {
+                        ParentIndex::Document(DocumentIndex) => {
+                            prop_assert_eq!(storage.root, Some(i))
+                        }
+                        ParentIndex::Element(p) => {
+                            prop_assert!(storage[p].children.contains(&i.into()));
+                        }
+                    }
+                }
+            }
+
+            // Every attribute's parent has that attribute as a child
+            for (i, a) in storage.iter_attributes() {
+                if let Some(p) = a.parent {
+                    prop_assert!(storage[p].attributes.contains(&i));
+                }
+            }
+
+            // Every text's parent has that text as a child
+            for (i, t) in storage.iter_texts() {
+                if let Some(p) = t.parent {
+                    prop_assert!(storage[p].children.contains(&i.into()));
+                }
+            }
+
+            // Every comment's parent has that comment as a child
+            for (i, c) in storage.iter_comments() {
+                if let Some(p) = c.parent {
+                    match p {
+                        ParentIndex::Document(DocumentIndex) => {
+                            prop_assert!([&storage.preamble, &storage.postamble]
+                                .iter()
+                                .any(|l| l.contains(&i)));
+                        }
+                        ParentIndex::Element(p) => {
+                            prop_assert!(storage[p].children.contains(&i.into()));
+                        }
+                    }
+                }
+            }
+
+            // Every child of the document has the document as a parent
+            for c in storage.iter_document_children() {
+                match c {
+                    DocumentChildIndex::Element(e) => {
+                        prop_assert_eq!(storage[e].parent, Some(ParentIndex::DOCUMENT))
+                    }
+                    DocumentChildIndex::Comment(c) => {
+                        prop_assert_eq!(storage[c].parent, Some(ParentIndex::DOCUMENT))
+                    }
+                }
+            }
+
+            // Every child of an element has the element as a parent
+            for (i, e) in storage.iter_elements() {
+                for &a in &e.attributes {
+                    prop_assert_eq!(storage[a].parent, Some(i));
+                }
+
+                for &c in &e.children {
+                    match c {
+                        ChildIndex::Element(e) => {
+                            prop_assert_eq!(storage[e].parent, Some(i.into()))
+                        }
+                        ChildIndex::Text(t) => prop_assert_eq!(storage[t].parent, Some(i)),
+                        ChildIndex::Comment(c) => {
+                            prop_assert_eq!(storage[c].parent, Some(i.into()))
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
+        proptest! {
+            #[test]
+            fn parents_know_of_their_children_and_vice_versa(
+                commands in proptest::collection::vec(construction_command(), 0..=100),
+            ) {
+                let doc = build(commands);
+                parents_know_of_their_children_and_vice_versa_core(doc)?;
+            }
+
+            // Property: Attribute names are unique
+            // Property: No child occurs more than once in the tree
+        }
     }
 }
