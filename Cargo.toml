@@ -29,3 +29,5 @@ token = { package = "sxd-token", path = "token" }
 pull-parser = { package = "sxd-pull-parser", path = "pull-parser" }
 formatter = { package = "sxd-formatter", path = "formatter" }
 validation = { package = "sxd-validation", path = "validation" }
+
+argh = { version = "0.1.7", default-features = false }
