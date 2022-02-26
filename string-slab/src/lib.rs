@@ -411,6 +411,11 @@ impl CheckedArena {
             }
         }
     }
+
+    /// Remove the safety checks and place them on the caller.
+    pub fn into_unsafe_arena(self) -> UnsafeArena {
+        RefCell::into_inner(*self.0)
+    }
 }
 
 impl Index<CheckedKey> for CheckedArena {
@@ -425,6 +430,13 @@ impl Index<CheckedKey> for CheckedArena {
 /// Use [`CheckedArena::as_str`] if you need the string data.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CheckedKey(*const RefCell<UnsafeArena>, UnsafeKey);
+
+impl CheckedKey {
+    /// Remove the safety checks and place them on the caller.
+    pub fn into_unsafe_key(self) -> UnsafeKey {
+        self.1
+    }
+}
 
 #[cfg(test)]
 mod test {
