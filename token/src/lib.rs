@@ -113,3 +113,15 @@ where
         self.unify().fmt(f)
     }
 }
+
+/// Many producers of tokens return an "index" — a value which doesn't
+/// contain a reference. Consumers of tokens want to work with a
+/// `&str` (raw or wrapped). This allows exchanging the index for a
+/// string-like type.
+pub trait Exchange<I> {
+    type Output<'a>
+    where
+        Self: 'a;
+
+    fn exchange(&self, idx: I) -> Self::Output<'_>;
+}

@@ -9,18 +9,8 @@ use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::io::Read;
 use string_slab::{CheckedArena, CheckedKey};
-use token::{Token, TokenKind};
+use token::{Exchange, Token, TokenKind};
 use util::{QName, QNameBuilder};
-
-trait Exchange {
-    fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str>;
-}
-
-impl Exchange for CheckedArena {
-    fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str> {
-        qname.map(|v| &self[v])
-    }
-}
 
 trait Fused {
     fn as_fused_str(&self) -> &str;
@@ -346,7 +336,6 @@ impl ValidatorCore {
             seen_one_element,
             element_stack,
             attributes,
-            arena,
             ..
         } = self;
 
@@ -354,7 +343,7 @@ impl ValidatorCore {
             ensure!(
                 !*seen_one_element,
                 MultipleTopLevelElementsSnafu {
-                    name: arena.exchange(name)
+                    name: self.exchange(name)
                 }
             );
             *seen_one_element = true;
@@ -377,18 +366,14 @@ impl ValidatorCore {
     }
 
     fn finish_element_close(&mut self, close: QName<CheckedKey>) -> Result<()> {
-        let Self {
-            element_stack,
-            arena,
-            ..
-        } = self;
+        let Self { element_stack, .. } = self;
 
         let open = element_stack.pop().context(ElementClosedWithoutOpenSnafu)?;
         ensure!(
             open == close,
             ElementOpenAndCloseMismatchedSnafu {
-                open: arena.exchange(open),
-                close: arena.exchange(close),
+                open: self.exchange(open),
+                close: self.exchange(close),
             },
         );
 
@@ -406,14 +391,12 @@ impl ValidatorCore {
     }
 
     fn finish_attribute_start(&mut self, name: QName<CheckedKey>) -> Result<()> {
-        let Self {
-            attributes, arena, ..
-        } = self;
+        let Self { attributes, .. } = self;
 
         ensure!(
             attributes.insert(name),
             AttributeDuplicateSnafu {
-                name: arena.exchange(name),
+                name: self.exchange(name),
             },
         );
 
@@ -426,20 +409,27 @@ impl ValidatorCore {
         self.flush_attribute_start()?;
 
         let Self {
-            arena,
             element_stack,
             seen_one_element,
             ..
         } = self;
 
         if let Some(opened) = element_stack.pop() {
-            let name = arena.exchange(opened);
+            let name = self.exchange(opened);
             return ElementOpenedWithoutCloseSnafu { name }.fail();
         }
 
         ensure!(*seen_one_element, NoTopLevelElementsSnafu);
 
         Ok(())
+    }
+}
+
+impl Exchange<QName<CheckedKey>> for ValidatorCore {
+    type Output<'a> = QName<&'a str>;
+
+    fn exchange(&self, idx: QName<CheckedKey>) -> Self::Output<'_> {
+        idx.map(|i| &self.arena[i])
     }
 }
 
@@ -507,7 +497,7 @@ impl<R: Read> token::Source for Validator<R> {
                 Err(e) => Some(Err(e)),
             },
             Some(Ok(v)) => {
-                let v2 = parser.exchange(v);
+                let v2: FusedToken<'_> = v.exchange_through(parser);
 
                 match core.push(v2) {
                     Ok(()) => Some(Ok(v)),
@@ -521,7 +511,7 @@ impl<R: Read> token::Source for Validator<R> {
     fn next_str(&mut self) -> Option<Result<FusedToken<'_>>> {
         let v = self.next_index();
         let parser = &self.parser;
-        v.map(|r| r.map(|t| parser.exchange(t)))
+        v.map(|r| r.map(|t| t.exchange_through(parser)))
     }
 }
 
