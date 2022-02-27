@@ -1,6 +1,7 @@
 #![deny(rust_2018_idioms)]
 
 use argh::FromArgs;
+use document::Document;
 use formatter::Formatter;
 use pull_parser::{Fuse as Fuser, Parser};
 use std::{
@@ -36,13 +37,13 @@ struct Args {
 
     /// how to process the XML file.
     ///
-    /// Valid choices: parse, fuse, validate.
+    /// Valid choices: parse, fuse, validate, build-document.
     #[argh(option)]
     process: Option<ProcessKind>,
 
     /// how to output the XML file.
     ///
-    /// Valid choices: count, null, stdout.
+    /// Valid choices: create, count, null, stdout.
     #[argh(option)]
     output: Option<OutputKind>,
 
@@ -142,6 +143,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gen_validator = || Validator::new(gen_parser());
 
+    let gen_document = || {
+        let mut validator = gen_validator();
+        Document::from_validator(&mut validator)
+    };
+
     let gen_quiet = || {
         let out = io::sink();
         BufWriter::with_capacity(output_buffer_size, out)
@@ -155,15 +161,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use {OutputKind as OK, ProcessKind as PK};
     let mut process: Box<dyn Process> = match (process, output) {
+        (PK::Parse, OK::Create) => Create::new_object(gen_parser()),
         (PK::Parse, OK::Count) => CountIndex::new_object(gen_parser()),
         (PK::Parse, OK::Null) => Format::new_object(gen_parser(), gen_quiet()),
         (PK::Parse, OK::Stdout) => Format::new_object(gen_parser(), gen_stdout()),
+        (PK::Fuse, OK::Create) => Create::new_object(gen_fuser()),
         (PK::Fuse, OK::Count) => CountIndex::new_object(gen_fuser()),
         (PK::Fuse, OK::Null) => Format::new_object(gen_fuser(), gen_quiet()),
         (PK::Fuse, OK::Stdout) => Format::new_object(gen_fuser(), gen_stdout()),
+        (PK::Validate, OK::Create) => Create::new_object(gen_validator()),
         (PK::Validate, OK::Count) => CountIndex::new_object(gen_validator()),
         (PK::Validate, OK::Null) => Format::new_object(gen_validator(), gen_quiet()),
         (PK::Validate, OK::Stdout) => Format::new_object(gen_validator(), gen_stdout()),
+        (PK::BuildDocument, OK::Create) => Create::new_object(gen_document()?),
+        (PK::BuildDocument, OK::Count) => CountIndexDocument::new_object(gen_document()?),
+        (PK::BuildDocument, OK::Null) => FormatDocument::new_object(gen_document()?, gen_quiet()),
+        (PK::BuildDocument, OK::Stdout) => {
+            FormatDocument::new_object(gen_document()?, gen_stdout())
+        }
     };
 
     let count = process.process()?;
@@ -175,6 +190,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 trait Process {
     fn process(&mut self) -> Result<usize>;
+}
+
+struct Create<I>(I);
+
+impl<'a, I: 'a> Create<I> {
+    fn new_object(i: I) -> Box<dyn Process + 'a> {
+        Box::new(Self(i))
+    }
+}
+
+impl<I> Process for Create<I> {
+    fn process(&mut self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 struct CountIndex<I>(I);
@@ -235,16 +264,51 @@ where
     }
 }
 
+struct CountIndexDocument(Document);
+
+impl CountIndexDocument {
+    fn new_object(d: Document) -> Box<dyn Process> {
+        Box::new(Self(d))
+    }
+}
+
+impl Process for CountIndexDocument {
+    fn process(&mut self) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+struct FormatDocument<W>(Document, W);
+
+impl<'a, W> FormatDocument<W>
+where
+    W: Write + 'a,
+{
+    fn new_object(d: Document, w: W) -> Box<dyn Process + 'a> {
+        Box::new(Self(d, w))
+    }
+}
+
+impl<W> Process for FormatDocument<W>
+where
+    W: Write,
+{
+    fn process(&mut self) -> Result<usize> {
+        Ok(0)
+    }
+}
+
 #[derive(Debug)]
 enum ProcessKind {
     Parse,
     Fuse,
     Validate,
+    BuildDocument,
 }
 
 impl Default for ProcessKind {
     fn default() -> Self {
-        ProcessKind::Validate
+        ProcessKind::BuildDocument
     }
 }
 
@@ -256,6 +320,7 @@ impl FromStr for ProcessKind {
             "parse" => Ok(ProcessKind::Parse),
             "fuse" => Ok(ProcessKind::Fuse),
             "validate" => Ok(ProcessKind::Validate),
+            "build-document" => Ok(ProcessKind::BuildDocument),
             _ => Err(format!("unknown process type {s}")),
         }
     }
@@ -263,6 +328,7 @@ impl FromStr for ProcessKind {
 
 #[derive(Debug)]
 enum OutputKind {
+    Create,
     Count,
     Null,
     Stdout,
@@ -279,6 +345,7 @@ impl FromStr for OutputKind {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "create" => Ok(OutputKind::Create),
             "count" => Ok(OutputKind::Count),
             "null" => Ok(OutputKind::Null),
             "stdout" => Ok(OutputKind::Stdout),
