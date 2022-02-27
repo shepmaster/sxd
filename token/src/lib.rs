@@ -43,6 +43,13 @@ impl IsComplete for str {
     }
 }
 
+impl IsComplete for char {
+    #[inline]
+    fn is_complete(&self) -> bool {
+        panic!("This is a hack; `char` should not be formatted directly")
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq)]
 pub enum Streaming<T> {
     Partial(T),

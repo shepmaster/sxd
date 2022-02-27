@@ -143,10 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gen_validator = || Validator::new(gen_parser());
 
-    let gen_document = || {
-        let mut validator = gen_validator();
-        Document::from_validator(&mut validator)
-    };
+    let gen_document = || Document::from_validator(gen_validator());
 
     let gen_quiet = || {
         let out = io::sink();

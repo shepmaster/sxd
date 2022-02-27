@@ -16,14 +16,13 @@ use std::{
 };
 use string_slab::{UnsafeArena, UnsafeKey};
 use thunderdome::Index;
-use token::{Source, Streaming, Token, UniformToken};
+use token::{Exchange, Source, Streaming, Token, UniformToken};
 use util::{QName, QNameBuilder2};
 use validation::Validator;
 
 // TODO: Decide if `Foo` and `FooRef` pull their weight or not
 // TODO: Most code should live down around `CoreStorage` so that we can avoid excessive `borrow` / `borrow_mut`
 // TODO: Need to validate names/strings are valid XML
-// TODO: Avoid re-interning things?
 
 // https://github.com/LPGhatguy/thunderdome/pull/35
 trait ThuderdomePolyfill {
@@ -560,8 +559,8 @@ impl FromStr for Document {
 
     fn from_str(s: &str) -> Result<Self> {
         let parser = Parser::new(s.as_bytes());
-        let mut validator = Validator::new(parser);
-        Document::from_validator(&mut validator)
+        let validator = Validator::new(parser);
+        Document::from_validator(validator)
     }
 }
 
@@ -570,11 +569,10 @@ impl Document {
         Self::default()
     }
 
-    pub fn from_validator<T>(validator: &mut Validator<T>) -> Result<Self>
+    pub fn from_validator<T>(mut validator: Validator<T>) -> Result<Self>
     where
         T: std::io::Read,
     {
-        // TODO: any interns in here should be checked at a higher level and shared with the validator.
         let mut storage = CoreStorage::default();
 
         let mut elements = Vec::new();
@@ -585,7 +583,7 @@ impl Document {
         let mut comment = String::new();
         let mut qname = QNameBuilder2::default();
 
-        while let Some(token) = validator.next_str() {
+        while let Some(token) = validator.next_index() {
             use Token::*;
 
             match token? {
@@ -595,10 +593,10 @@ impl Document {
                 DeclarationClose => { /* no-op */ }
 
                 ElementOpenStart(name) => {
-                    qname.push(storage.strings.intern(name));
+                    qname.push(name.into_unsafe_key());
                 }
                 ElementOpenStartSuffix(name) => {
-                    qname.push(storage.strings.intern(name));
+                    qname.push(name.into_unsafe_key());
                 }
                 ElementOpenStartComplete => {
                     let name = qname.finish().expect("No QName");
@@ -629,10 +627,10 @@ impl Document {
                 }
 
                 AttributeStart(name) => {
-                    qname.push(storage.strings.intern(name));
+                    qname.push(name.into_unsafe_key());
                 }
                 AttributeStartSuffix(name) => {
-                    qname.push(storage.strings.intern(name));
+                    qname.push(name.into_unsafe_key());
                 }
                 AttributeStartComplete => {
                     let name = qname.finish().expect("No QName");
@@ -640,7 +638,8 @@ impl Document {
                 }
                 AttributeValueLiteral(value) => {
                     let value = value.into_complete().expect("TODO");
-                    let value = storage.strings.intern(value);
+                    let value = validator.exchange(value);
+                    let value = validator.arena().intern(value).into_unsafe_key();
                     current_attribute_value = Some(value);
                 }
                 AttributeValueReferenceNamed(_) => todo!(),
@@ -657,7 +656,7 @@ impl Document {
                     }
                 }
 
-                CharData(text) => match text {
+                CharData(text) => match text.map(|v| validator.exchange(v)) {
                     Streaming::Partial(c) => chardata.push_str(c),
                     Streaming::Complete(c) => {
                         chardata.push_str(c);
@@ -679,7 +678,7 @@ impl Document {
                 ProcessingInstructionValue(_) => todo!(),
                 ProcessingInstructionEnd => todo!(),
 
-                Comment(text) => match text {
+                Comment(text) => match text.map(|v| validator.exchange(v)) {
                     Streaming::Partial(text) => comment.push_str(text),
                     Streaming::Complete(text) => {
                         comment.push_str(text);
@@ -697,6 +696,9 @@ impl Document {
                 },
             }
         }
+
+        // Steal the pre-interned data
+        storage.strings = validator.into_arena().into_unsafe_arena();
 
         let storage = Storage(Rc::new(RefCell::new(storage)));
         Ok(Document {
