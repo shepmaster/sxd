@@ -274,7 +274,16 @@ impl CountIndexDocument {
 
 impl Process for CountIndexDocument {
     fn process(&mut self) -> Result<usize> {
-        Ok(0)
+        self.0.tokens(|mut t| {
+            let mut count = 0;
+
+            while let Some(token) = t.next_str() {
+                let _token = token;
+                count += 1;
+            }
+
+            Ok(count)
+        })
     }
 }
 
@@ -294,7 +303,19 @@ where
     W: Write,
 {
     fn process(&mut self) -> Result<usize> {
-        Ok(0)
+        self.0.tokens(|mut t| {
+            let mut count = 0;
+            let mut fmt = Formatter::new(&mut self.1);
+
+            while let Some(token) = t.next_str() {
+                let _token = token;
+                count += 1;
+
+                fmt.write_token(token)?;
+            }
+
+            Ok(count)
+        })
     }
 }
 

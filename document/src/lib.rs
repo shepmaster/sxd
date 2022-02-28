@@ -9,10 +9,11 @@ use std::{
     mem, ops,
     rc::Rc,
     str::FromStr,
+    vec,
 };
 use string_slab::{UnsafeArena, UnsafeKey};
 use thunderdome::Index;
-use token::{Source, Streaming, Token};
+use token::{Source, Streaming, Token, UniformToken};
 use util::{QName, QNameBuilder2};
 use validation::Validator;
 
@@ -315,9 +316,16 @@ impl Document {
                 ElementClose(_) => { /* no-op */ }
                 ElementCloseSuffix(_) => { /* no-op */ }
                 ElementSelfClose | ElementCloseComplete => {
-                    if let Some(e) = elements.pop() {
-                        if elements.is_empty() {
-                            storage.root = Some(e);
+                    if let Some(e_idx) = elements.pop() {
+                        // TODO write test for `Some` case missing
+                        match elements.last() {
+                            Some(&p_idx) => {
+                                let p = &mut storage[p_idx];
+                                p.children.push(e_idx.into());
+                                let e = &mut storage[e_idx];
+                                e.parent = Some(p_idx.into());
+                            }
+                            None => storage.root = Some(e_idx),
                         }
                     }
                 }
@@ -413,6 +421,128 @@ impl Document {
             let mut storage = self.storage.0.borrow_mut();
             storage.root = Some(element.index)
         }
+    }
+
+    pub fn tokens<R>(&self, f: impl FnOnce(Tokens<'_>) -> R) -> R {
+        let storage = self.storage.0.borrow();
+        f(Tokens::new(&storage))
+    }
+}
+
+#[derive(Debug)]
+pub struct Tokens<'a> {
+    storage: &'a CoreStorage,
+    output: vec::IntoIter<UniformToken<&'a str>>,
+}
+
+impl<'a> Tokens<'a> {
+    fn new(storage: &'a CoreStorage) -> Self {
+        use Token as T;
+
+        let mut output = vec![
+            T::DeclarationStart("1.0"),
+            // TODO encoding; standalone
+            T::DeclarationClose,
+        ];
+
+        if let Some(e) = storage.root {
+            one_element(storage, e, &mut output);
+        }
+
+        let output = output.into_iter();
+
+        Self { storage, output }
+    }
+
+    pub fn next_str(&mut self) -> Option<UniformToken<&'a str>> {
+        self.output.next()
+    }
+}
+
+fn one_element<'a>(
+    storage: &'a CoreStorage,
+    e: ElementIndex,
+    output: &mut Vec<UniformToken<&'a str>>,
+) {
+    use Token as T;
+
+    let e = &storage[e];
+    one_qname(
+        e.name,
+        storage,
+        T::ElementOpenStart,
+        T::ElementOpenStartSuffix,
+        T::ElementOpenStartComplete,
+        output,
+    );
+    for &(n, v) in &e.attributes {
+        one_qname(
+            n,
+            storage,
+            T::AttributeStart,
+            T::AttributeStartSuffix,
+            T::AttributeStartComplete,
+            output,
+        );
+
+        // TODO: escaping of things here
+        unsafe { output.push(T::AttributeValueLiteral(storage.strings.as_str(v))) }
+        output.push(T::AttributeValueEnd);
+    }
+    match &*e.children {
+        [] => output.push(T::ElementSelfClose),
+        c => {
+            output.push(T::ElementOpenEnd);
+
+            for &c in c {
+                match c {
+                    ChildIndex::Element(e) => one_element(storage, e, output),
+                    ChildIndex::Text(t) => one_text(storage, t, output),
+                }
+            }
+
+            one_qname(
+                e.name,
+                storage,
+                T::ElementClose,
+                T::ElementCloseSuffix,
+                T::ElementCloseComplete,
+                output,
+            );
+        }
+    }
+}
+
+fn one_text<'a>(storage: &'a CoreStorage, t: TextIndex, output: &mut Vec<UniformToken<&'a str>>) {
+    use Token as T;
+
+    let t = &storage[t];
+
+    // TODO: escaping of things here
+    output.push(T::CharData(&**t))
+}
+
+fn one_qname<'a>(
+    name: QName<UnsafeKey>,
+    storage: &'a CoreStorage,
+    a: fn(&'a str) -> UniformToken<&'a str>,
+    b: fn(&'a str) -> UniformToken<&'a str>,
+    c: UniformToken<&'a str>,
+
+    output: &mut Vec<UniformToken<&'a str>>,
+) {
+    unsafe {
+        match name.prefix {
+            Some(prefix) => {
+                output.push(a(storage.strings.as_str(prefix)));
+                output.push(b(storage.strings.as_str(name.local_part)));
+            }
+            None => {
+                output.push(a(storage.strings.as_str(name.local_part)));
+            }
+        }
+
+        output.push(c);
     }
 }
 
