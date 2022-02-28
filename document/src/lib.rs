@@ -7,7 +7,7 @@ use pull_parser::Parser;
 use snafu::Snafu;
 use std::{
     cell::{Ref, RefCell},
-    convert::{TryFrom, TryInto},
+    convert::TryFrom,
     mem,
     ops::{self, Deref},
     rc::Rc,
@@ -115,7 +115,7 @@ struct CoreStorage {
 
     strings: UnsafeArena,
     elements: thunderdome::Arena<ElementStorage>,
-    texts: thunderdome::Arena<String>,
+    texts: thunderdome::Arena<TextStorage>,
 }
 
 impl CoreStorage {
@@ -145,6 +145,14 @@ impl CoreStorage {
         f(&mut e);
         ElementIndex(self.elements.insert(e))
     }
+
+    fn create_text_with_parent(&mut self, value: String, parent: ElementIndex) -> TextIndex {
+        let index = self.texts.insert(TextStorage {
+            value,
+            parent: Some(parent),
+        });
+        TextIndex(index)
+    }
 }
 
 macro_rules! delegate_index {
@@ -169,7 +177,7 @@ macro_rules! delegate_index {
 
 delegate_index! {
     elements[ElementIndex] -> ElementStorage,
-    texts[TextIndex] -> String,
+    texts[TextIndex] -> TextStorage,
 }
 
 #[derive(Debug)]
@@ -180,6 +188,12 @@ struct ElementStorage {
     // TODO: Should we create an `Attribute` type?
     attributes: Vec<(QName<UnsafeKey>, UnsafeKey)>,
     children: Vec<ChildIndex>,
+}
+
+#[derive(Debug)]
+struct TextStorage {
+    value: String,
+    parent: Option<ElementIndex>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -398,8 +412,7 @@ impl Document {
                         let chardata = mem::take(&mut chardata);
 
                         if let Some(index) = elements.last().copied() {
-                            let text = storage.texts.insert(chardata);
-                            let text = TextIndex(text);
+                            let text = storage.create_text_with_parent(chardata, index);
                             storage[index].children.push(text.into())
                         }
                     }
@@ -552,7 +565,7 @@ fn one_text<'a>(storage: &'a CoreStorage, t: TextIndex, output: &mut Vec<Uniform
     let t = &storage[t];
 
     // TODO: escaping of things here
-    output.push(T::CharData(&**t))
+    output.push(T::CharData(&*t.value))
 }
 
 fn one_qname<'a>(
@@ -703,19 +716,6 @@ impl<'a> ElementRef<'a> {
             })
         })
     }
-
-    fn text_value(&self) -> String {
-        self.storage.access(self.index, |storage, element| {
-            if let Some(c) = element.children.last().copied() {
-                assert_eq!(1, element.children.len(), "TODO: Handle different lengths");
-                let TextIndex(index) = c.try_into().expect("TODO");
-                // TODO: how can we avoid this clone
-                storage.texts[index].clone()
-            } else {
-                String::new()
-            }
-        })
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -741,10 +741,6 @@ impl Element {
     {
         self.as_ref().attribute_value(attribute_name)
     }
-
-    fn text_value(&self) -> String {
-        self.as_ref().text_value()
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -757,6 +753,18 @@ impl<'a> From<(&'a Storage, TextIndex)> for TextRef<'a> {
     fn from(other: (&'a Storage, TextIndex)) -> Self {
         let (storage, index) = other;
         TextRef { storage, index }
+    }
+}
+
+impl<'a> TextRef<'a> {
+    fn value(&self) -> impl Deref<Target = str> {
+        self.storage.ref_str(|the_ref| &the_ref[self.index].value)
+    }
+
+    fn parent(&self) -> Option<ElementRef<'a>> {
+        self.storage.access(self.index, |_, text| {
+            text.parent.map(|text| (self.storage, text).into())
+        })
     }
 }
 
@@ -845,6 +853,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::TryInto;
 
     type Error = Box<dyn std::error::Error>;
     type Result<T = (), E = Error> = std::result::Result<T, E>;
@@ -878,7 +887,14 @@ mod tests {
             let doc = Document::from_str(r#"<a>hello</a>"#)?;
             let root = doc.root().expect("Root missing");
 
-            assert_eq!("hello", root.text_value());
+            let text: TextRef<'_> = root
+                .children()
+                .pop()
+                .expect("No child")
+                .try_into()
+                .expect("Not text");
+            assert_eq!("hello", &*text.value());
+            assert_eq!(Some(root), text.parent());
 
             Ok(())
         }
