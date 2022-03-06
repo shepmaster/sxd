@@ -7,6 +7,102 @@ pub trait Format: IsComplete + fmt::Debug + fmt::Display {}
 
 impl<T> Format for T where T: IsComplete + fmt::Debug + fmt::Display {}
 
+pub trait FormatKind:
+    TokenKind<
+    DeclarationStart = Self::FmtDeclarationStart,
+    DeclarationEncoding = Self::FmtDeclarationEncoding,
+    DeclarationStandalone = Self::FmtDeclarationStandalone,
+    ElementOpenStart = Self::FmtElementOpenStart,
+    ElementOpenStartSuffix = Self::FmtElementOpenStartSuffix,
+    ElementClose = Self::FmtElementClose,
+    ElementCloseSuffix = Self::FmtElementCloseSuffix,
+    AttributeStart = Self::FmtAttributeStart,
+    AttributeStartSuffix = Self::FmtAttributeStartSuffix,
+    AttributeValueLiteral = Self::FmtAttributeValueLiteral,
+    AttributeValueReferenceNamed = Self::FmtAttributeValueReferenceNamed,
+    AttributeValueReferenceDecimal = Self::FmtAttributeValueReferenceDecimal,
+    AttributeValueReferenceHex = Self::FmtAttributeValueReferenceHex,
+    CharData = Self::FmtCharData,
+    CData = Self::FmtCData,
+    ReferenceNamed = Self::FmtReferenceNamed,
+    ReferenceDecimal = Self::FmtReferenceDecimal,
+    ReferenceHex = Self::FmtReferenceHex,
+    ProcessingInstructionStart = Self::FmtProcessingInstructionStart,
+    ProcessingInstructionValue = Self::FmtProcessingInstructionValue,
+    Comment = Self::FmtComment,
+>
+{
+    type FmtDeclarationStart: Format;
+    type FmtDeclarationEncoding: Format;
+    type FmtDeclarationStandalone: Format;
+    type FmtElementOpenStart: Format;
+    type FmtElementOpenStartSuffix: Format;
+    type FmtElementClose: Format;
+    type FmtElementCloseSuffix: Format;
+    type FmtAttributeStart: Format;
+    type FmtAttributeStartSuffix: Format;
+    type FmtAttributeValueLiteral: Format;
+    type FmtAttributeValueReferenceNamed: Format;
+    type FmtAttributeValueReferenceDecimal: Format;
+    type FmtAttributeValueReferenceHex: Format;
+    type FmtCharData: Format;
+    type FmtCData: Format;
+    type FmtReferenceNamed: Format;
+    type FmtReferenceDecimal: Format;
+    type FmtReferenceHex: Format;
+    type FmtProcessingInstructionStart: Format;
+    type FmtProcessingInstructionValue: Format;
+    type FmtComment: Format;
+}
+
+impl<K> FormatKind for K
+where
+    K: TokenKind,
+    Self::DeclarationStart: Format,
+    Self::DeclarationEncoding: Format,
+    Self::DeclarationStandalone: Format,
+    Self::ElementOpenStart: Format,
+    Self::ElementOpenStartSuffix: Format,
+    Self::ElementClose: Format,
+    Self::ElementCloseSuffix: Format,
+    Self::AttributeStart: Format,
+    Self::AttributeStartSuffix: Format,
+    Self::AttributeValueLiteral: Format,
+    Self::AttributeValueReferenceNamed: Format,
+    Self::AttributeValueReferenceDecimal: Format,
+    Self::AttributeValueReferenceHex: Format,
+    Self::CharData: Format,
+    Self::CData: Format,
+    Self::ReferenceNamed: Format,
+    Self::ReferenceDecimal: Format,
+    Self::ReferenceHex: Format,
+    Self::ProcessingInstructionStart: Format,
+    Self::ProcessingInstructionValue: Format,
+    Self::Comment: Format,
+{
+    type FmtDeclarationStart = Self::DeclarationStart;
+    type FmtDeclarationEncoding = Self::DeclarationEncoding;
+    type FmtDeclarationStandalone = Self::DeclarationStandalone;
+    type FmtElementOpenStart = Self::ElementOpenStart;
+    type FmtElementOpenStartSuffix = Self::ElementOpenStartSuffix;
+    type FmtElementClose = Self::ElementClose;
+    type FmtElementCloseSuffix = Self::ElementCloseSuffix;
+    type FmtAttributeStart = Self::AttributeStart;
+    type FmtAttributeStartSuffix = Self::AttributeStartSuffix;
+    type FmtAttributeValueLiteral = Self::AttributeValueLiteral;
+    type FmtAttributeValueReferenceNamed = Self::AttributeValueReferenceNamed;
+    type FmtAttributeValueReferenceDecimal = Self::AttributeValueReferenceDecimal;
+    type FmtAttributeValueReferenceHex = Self::AttributeValueReferenceHex;
+    type FmtCharData = Self::CharData;
+    type FmtCData = Self::CData;
+    type FmtReferenceNamed = Self::ReferenceNamed;
+    type FmtReferenceDecimal = Self::ReferenceDecimal;
+    type FmtReferenceHex = Self::ReferenceHex;
+    type FmtProcessingInstructionStart = Self::ProcessingInstructionStart;
+    type FmtProcessingInstructionValue = Self::ProcessingInstructionValue;
+    type FmtComment = Self::Comment;
+}
+
 pub struct Formatter<W> {
     output: W,
 
@@ -64,28 +160,7 @@ where
 
     pub fn write_token<K>(&mut self, token: Token<K>) -> std::io::Result<()>
     where
-        K: TokenKind,
-        K::DeclarationStart: Format,
-        K::DeclarationEncoding: Format,
-        K::DeclarationStandalone: Format,
-        K::ElementOpenStart: Format,
-        K::ElementOpenStartSuffix: Format,
-        K::ElementClose: Format,
-        K::ElementCloseSuffix: Format,
-        K::AttributeStart: Format,
-        K::AttributeStartSuffix: Format,
-        K::AttributeValueLiteral: Format,
-        K::AttributeValueReferenceNamed: Format,
-        K::AttributeValueReferenceDecimal: Format,
-        K::AttributeValueReferenceHex: Format,
-        K::CharData: Format,
-        K::CData: Format,
-        K::ReferenceNamed: Format,
-        K::ReferenceDecimal: Format,
-        K::ReferenceHex: Format,
-        K::ProcessingInstructionStart: Format,
-        K::ProcessingInstructionValue: Format,
-        K::Comment: Format,
+        K: FormatKind,
     {
         use token::Token::*;
 
