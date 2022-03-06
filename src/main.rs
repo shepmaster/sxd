@@ -8,6 +8,7 @@ use std::{
     io::{self, BufWriter, Read, Write},
     str::FromStr,
 };
+use token::Source;
 use validation::Validator;
 
 type Error = Box<dyn std::error::Error>;

@@ -2,6 +2,7 @@
 
 use formatter::Formatter;
 use pull_parser::Parser;
+use token::Source;
 
 type BoxError = Box<dyn std::error::Error>;
 type Result<T = (), E = BoxError> = std::result::Result<T, E>;

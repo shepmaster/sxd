@@ -3,7 +3,7 @@
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
 use std::{io::Read, marker::PhantomData, mem, str};
-use token::{IsComplete, Streaming, Token, TokenKind, UniformToken};
+use token::{IsComplete, Streaming, Token, TokenKind, UniformKind, UniformToken};
 
 #[macro_use]
 mod macros;
@@ -632,6 +632,7 @@ impl AsRef<str> for Quote {
     }
 }
 
+type IndexKind = UniformKind<Streaming<usize>>;
 type IndexToken = UniformToken<Streaming<usize>>;
 type RollbackState = (usize, usize);
 
@@ -1644,12 +1645,16 @@ where
             exhausted: false,
         }
     }
+}
 
-    // This method (and similar methods that return `usize` or other
-    // non-reference types) are a workaround for the current
-    // limitations of the borrow checker. If Polonius is ever merged,
-    // this can be simplified.
-    pub fn next_index(&mut self) -> Option<Result<IndexToken>> {
+impl<R: Read> token::Source for Parser<R> {
+    type IndexKind = IndexKind;
+    type StrKind<'a> = UniformKind<Streaming<&'a str>>
+    where
+        Self: 'a;
+    type Error = Error;
+
+    fn next_index(&mut self) -> Option<Result<IndexToken>> {
         let Self {
             parser,
             source,
@@ -1684,7 +1689,7 @@ where
         }
     }
 
-    pub fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
+    fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
         let v = self.next_index();
         v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.parser.exchange(idx)))))
     }
@@ -1858,30 +1863,6 @@ where
         }
     }
 
-    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken, FuseError>> {
-        let Self { inner, core } = self;
-        while let Some(t) = inner.next_index() {
-            match t {
-                Ok(t) => {
-                    if let Some(t) = core.push(t, &inner.parser) {
-                        return Some(Ok(t));
-                    }
-                }
-                Err(e) => return Some(Err(e.into())),
-            }
-        }
-
-        match core.finish() {
-            Ok(v) => v.map(Ok),
-            Err(e) => Some(Err(e)),
-        }
-    }
-
-    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
-        let v = self.next_index();
-        v.map(move |r| r.map(move |t| self.exchange(t)))
-    }
-
     pub fn exchange(&self, token: FusedIndexToken) -> FusedToken<'_> {
         use {FusedIndex::*, Token::*};
 
@@ -1911,6 +1892,38 @@ where
     }
 }
 
+impl<R: Read> token::Source for Fuse<R> {
+    type IndexKind = FusedIndexKind;
+    type StrKind<'a> = FusedKind<'a>
+    where
+        Self: 'a;
+    type Error = FuseError;
+
+    fn next_index(&mut self) -> Option<Result<FusedIndexToken, FuseError>> {
+        let Self { inner, core } = self;
+        while let Some(t) = inner.next_index() {
+            match t {
+                Ok(t) => {
+                    if let Some(t) = core.push(t, &inner.parser) {
+                        return Some(Ok(t));
+                    }
+                }
+                Err(e) => return Some(Err(e.into())),
+            }
+        }
+
+        match core.finish() {
+            Ok(v) => v.map(Ok),
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn next_str(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
+        let v = self.next_index();
+        v.map(move |r| r.map(move |t| self.exchange(t)))
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum FuseError {
     Incomplete,
@@ -1924,6 +1937,7 @@ pub enum FuseError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use token::Source;
     use {Streaming::*, Token::*};
 
     type BoxError = Box<dyn std::error::Error>;

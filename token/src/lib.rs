@@ -6,6 +6,22 @@ include!(concat!(env!("OUT_DIR"), "/generated_token.rs"));
 
 pub type UniformToken<T> = Token<UniformKind<T>>;
 
+pub trait Source {
+    type IndexKind: TokenKind;
+    type StrKind<'a>: TokenKind
+    where
+        Self: 'a;
+    type Error: std::error::Error + 'static;
+
+    // This method (and similar methods that return `usize` or other
+    // non-reference types) are a workaround for the current
+    // limitations of the borrow checker. If Polonius is ever merged,
+    // this can be simplified.
+    fn next_index(&mut self) -> Option<Result<Token<Self::IndexKind>, Self::Error>>;
+
+    fn next_str(&mut self) -> Option<Result<Token<Self::StrKind<'_>>, Self::Error>>;
+}
+
 pub trait IsComplete {
     fn is_complete(&self) -> bool;
 }

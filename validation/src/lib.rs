@@ -2,7 +2,9 @@
 
 use hashbrown::HashSet;
 use once_cell::sync::Lazy;
-use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};
+use pull_parser::{
+    Fuse, FusedIndexKind, FusedIndexToken, FusedKind, FusedToken, Parser, XmlCharExt, XmlStrExt,
+};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::io::Read;
@@ -487,8 +489,16 @@ where
             core: Default::default(),
         }
     }
+}
 
-    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken>> {
+impl<R: Read> token::Source for Validator<R> {
+    type IndexKind = FusedIndexKind;
+    type StrKind<'a> = FusedKind<'a>
+    where
+        Self: 'a;
+    type Error = Error;
+
+    fn next_index(&mut self) -> Option<Result<FusedIndexToken>> {
         let Self { parser, core } = self;
 
         match parser.next_index() {
@@ -508,7 +518,7 @@ where
         }
     }
 
-    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>>> {
+    fn next_str(&mut self) -> Option<Result<FusedToken<'_>>> {
         let v = self.next_index();
         let parser = &self.parser;
         v.map(|r| r.map(|t| parser.exchange(t)))
