@@ -13,6 +13,9 @@ use std::{
 use token::Source;
 use validation::Validator;
 
+#[global_allocator]
+static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 type Error = Box<dyn std::error::Error>;
 type Result<T = (), E = Error> = std::result::Result<T, E>;
 

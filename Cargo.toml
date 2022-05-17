@@ -33,3 +33,4 @@ token = { package = "sxd-token", path = "token" }
 validation = { package = "sxd-validation", path = "validation" }
 
 argh = { version = "0.1.7", default-features = false }
+snmalloc-rs = "0.3.0-beta.1"
