@@ -2601,7 +2601,7 @@ mod test {
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
 
-            expect(&*input).with(capacity(32)).to(be_parsed_as([
+            expect(input).with(capacity(32)).to(be_parsed_as([
                 DeclarationStart(Complete("1.0")),
                 DeclarationClose,
             ]))
@@ -2618,7 +2618,7 @@ mod test {
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
 
-            expect(&*input).with(capacity(32)).to(be_parsed_as([
+            expect(input).with(capacity(32)).to(be_parsed_as([
                 DeclarationStart(Complete("1.0")),
                 DeclarationEncoding(Complete("UTF-8")),
                 DeclarationClose,
@@ -2636,7 +2636,7 @@ mod test {
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
 
-            expect(&*input).with(capacity(32)).to(be_parsed_as([
+            expect(input).with(capacity(32)).to(be_parsed_as([
                 DeclarationStart(Complete("1.0")),
                 DeclarationStandalone(Complete("no")),
                 DeclarationClose,
@@ -2653,7 +2653,7 @@ mod test {
             let input = "<a                                                             >";
             //           0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
             //           0               1               2               3
-            expect(&*input).with(capacity(32)).to(be_parsed_as([
+            expect(input).with(capacity(32)).to(be_parsed_as([
                 ElementOpenStart(Complete("a")),
                 ElementOpenStartComplete,
                 ElementOpenEnd,
