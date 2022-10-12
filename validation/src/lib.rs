@@ -210,7 +210,7 @@ impl ValidatorCore {
                 ensure!(!v.is_empty(), AttributeNameEmptySnafu);
 
                 *pending_attribute_name = Some(QNameBuilder::new(arena.intern(v)));
-                *is_xmlns = (v == "xmlns").then(|| XmlNsKind::Default);
+                *is_xmlns = (v == "xmlns").then_some(XmlNsKind::Default);
                 *attribute_value_had_content = false;
             }
             AttributeStartSuffix(v) => {
