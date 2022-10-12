@@ -27,7 +27,7 @@ unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *mut ffi::xml
 
     if let (Some(ctx), Some(error)) = (ctx.as_ref(), error.as_ref()) {
         if let Err(error) = Error::from_libxml2(error) {
-            let errors = (*ctx)._private as *mut Errors;
+            let errors = ctx._private as *mut Errors;
             let errors = &mut *errors;
             errors.push(error);
         }

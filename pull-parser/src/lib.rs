@@ -246,9 +246,9 @@ impl StringRing {
     }
 
     fn require_quote(&mut self) -> Result<Quote> {
-        if *abandon!(self.consume(&Quote::Double)) {
+        if *abandon!(self.consume(Quote::Double)) {
             Ok(Quote::Double)
-        } else if *abandon!(self.consume(&Quote::Single)) {
+        } else if *abandon!(self.consume(Quote::Single)) {
             Ok(Quote::Single)
         } else {
             let location = self.absolute_location();
