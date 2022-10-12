@@ -14,6 +14,7 @@ use std::{
     ops::Index,
     ptr::{self, NonNull},
     slice, str,
+    sync::atomic::{self, AtomicUsize},
 };
 
 /// # Safety
@@ -293,7 +294,7 @@ impl UnsafeArena {
     /// Nothing enforces that this key came from this arena. If it did not, then this will cause
     /// undefined behavior. This method allows the *caller* to decide what the lifetime should be,
     /// and should be used with great caution.
-    unsafe fn as_unbound_str<'a>(&self, key: UnsafeKey) -> &'a str {
+    pub unsafe fn as_unbound_str<'a>(&self, key: UnsafeKey) -> &'a str {
         key.0.as_unbound_str()
     }
 }
@@ -372,8 +373,18 @@ impl RootedArena {
 /// // Use indexing syntax if you are sure the key came from this arena.
 /// assert_eq!("hello", &arena[key]);
 /// ```
-#[derive(Debug, Default)]
-pub struct CheckedArena(Box<RefCell<UnsafeArena>>);
+#[derive(Debug)]
+// We originally put the `UnsafeArena` in the heap and relied on the memory address as verification
+// that the key matched the arena. However, if the memory allocator reused the address, that check
+// would be invalid. Instead, we keep a incrementing counter of `CheckedArena` instances and compare
+// that as an ID. If the user creates `usize::MAX` instances, we will panic.
+pub struct CheckedArena(usize, RefCell<UnsafeArena>);
+
+impl Default for CheckedArena {
+    fn default() -> Self {
+        Self::with_slab_size(UnsafeArena::DEFAULT_SLAB_SIZE)
+    }
+}
 
 impl CheckedArena {
     /// Creates an empty pool using the [default slab size](UnsafeArena::DEFAULT_SLAB_SIZE).
@@ -383,9 +394,17 @@ impl CheckedArena {
 
     /// Creates an empty pool using the specified slab size.
     pub fn with_slab_size(slab_size: usize) -> Self {
-        Self(Box::new(RefCell::new(UnsafeArena::with_slab_size(
-            slab_size,
-        ))))
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let id = COUNTER.fetch_add(1, atomic::Ordering::SeqCst);
+        assert!(
+            id != usize::MAX,
+            "No longer able to distinguish unique CheckedArena instances",
+        );
+
+        let arena = UnsafeArena::with_slab_size(slab_size);
+
+        Self(id, RefCell::new(arena))
     }
 
     /// Add a string to the pool.
@@ -393,8 +412,8 @@ impl CheckedArena {
     /// If it's not already present, the string will be copied to the pool. The returned
     /// [`CheckedKey`] can be used to tell if two strings are identical or get the string data.
     pub fn intern(&self, s: &str) -> CheckedKey {
-        let key = self.0.borrow_mut().intern(s);
-        CheckedKey(&*self.0, key)
+        let key = self.1.borrow_mut().intern(s);
+        CheckedKey(self.0, key)
     }
 
     /// Convert a [`CheckedKey`] into a string.
@@ -404,12 +423,17 @@ impl CheckedArena {
         // SAFETY: We ensure that the key comes from the same arena that it was generated from, and
         // we tie the lifetime to ourselves, so it cannot outlast the arena.
         unsafe {
-            if ptr::eq(&*self.0, key.0) {
-                Some(RefCell::borrow(&self.0).as_unbound_str(key.1))
+            if self.0 == key.0 {
+                Some(RefCell::borrow(&self.1).as_unbound_str(key.1))
             } else {
                 None
             }
         }
+    }
+
+    /// Remove the safety checks and place them on the caller.
+    pub fn into_unsafe_arena(self) -> UnsafeArena {
+        RefCell::into_inner(self.1)
     }
 }
 
@@ -424,7 +448,14 @@ impl Index<CheckedKey> for CheckedArena {
 ///
 /// Use [`CheckedArena::as_str`] if you need the string data.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CheckedKey(*const RefCell<UnsafeArena>, UnsafeKey);
+pub struct CheckedKey(usize, UnsafeKey);
+
+impl CheckedKey {
+    /// Remove the safety checks and place them on the caller.
+    pub fn into_unsafe_key(self) -> UnsafeKey {
+        self.1
+    }
+}
 
 #[cfg(test)]
 mod test {

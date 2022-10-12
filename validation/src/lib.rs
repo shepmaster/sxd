@@ -2,42 +2,13 @@
 
 use hashbrown::HashSet;
 use once_cell::sync::Lazy;
-use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};
+use pull_parser::{Fuse, FusedIndex, Parser, XmlCharExt, XmlStrExt};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
-use std::io::Read;
+use std::{io::Read, marker::PhantomData};
 use string_slab::{CheckedArena, CheckedKey};
-use token::{Token, TokenKind};
+use token::{Exchange, Streaming, Token, TokenKind};
 use util::{QName, QNameBuilder};
-
-trait Exchange {
-    fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str>;
-}
-
-impl Exchange for CheckedArena {
-    fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str> {
-        qname.map(|v| &self[v])
-    }
-}
-
-trait Fused {
-    fn as_fused_str(&self) -> &str;
-}
-
-impl<F> Fused for &'_ F
-where
-    F: Fused + ?Sized,
-{
-    fn as_fused_str(&self) -> &str {
-        F::as_fused_str(self)
-    }
-}
-
-impl Fused for str {
-    fn as_fused_str(&self) -> &str {
-        self
-    }
-}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum XmlNsKind {
@@ -62,28 +33,47 @@ struct ValidatorCore {
 }
 
 impl ValidatorCore {
-    fn push<K>(&mut self, token: Token<K>) -> Result<()>
+    fn push<'a, K, E>(&mut self, token: Token<K>, exchanger: &'a E) -> Result<ValidIndexToken<K>>
     where
         K: TokenKind,
-        K::DeclarationStart: Fused,
-        K::DeclarationEncoding: Fused,
-        K::DeclarationStandalone: Fused,
-        K::ElementOpenStart: Fused,
-        K::ElementOpenStartSuffix: Fused,
-        K::ElementClose: Fused,
-        K::ElementCloseSuffix: Fused,
-        K::AttributeStart: Fused,
-        K::AttributeStartSuffix: Fused,
-        K::AttributeValueLiteral: AsRef<str>,
-        K::AttributeValueReferenceNamed: Fused,
-        K::AttributeValueReferenceDecimal: Fused,
-        K::AttributeValueReferenceHex: Fused,
-        K::ReferenceNamed: Fused,
-        K::ReferenceDecimal: Fused,
-        K::ReferenceHex: Fused,
-        K::ProcessingInstructionStart: Fused,
-        K::CharData: AsRef<str>,
-        K::CData: AsRef<str>,
+        K::DeclarationStart: Copy,
+        K::DeclarationEncoding: Copy,
+        K::DeclarationStandalone: Copy,
+        K::ElementOpenStart: Copy,
+        K::ElementOpenStartSuffix: Copy,
+        K::ElementClose: Copy,
+        K::ElementCloseSuffix: Copy,
+        K::AttributeStart: Copy,
+        K::AttributeStartSuffix: Copy,
+        K::AttributeValueLiteral: Copy,
+        K::AttributeValueReferenceNamed: Copy,
+        K::AttributeValueReferenceDecimal: Copy,
+        K::AttributeValueReferenceHex: Copy,
+        K::ReferenceNamed: Copy,
+        K::ReferenceDecimal: Copy,
+        K::ReferenceHex: Copy,
+        K::ProcessingInstructionStart: Copy,
+        K::CharData: Copy,
+        K::CData: Copy,
+        E: Exchange<K::DeclarationStart, Output<'a> = &'a str>,
+        E: Exchange<K::DeclarationEncoding, Output<'a> = &'a str>,
+        E: Exchange<K::DeclarationStandalone, Output<'a> = &'a str>,
+        E: Exchange<K::ElementOpenStart, Output<'a> = &'a str>,
+        E: Exchange<K::ElementOpenStartSuffix, Output<'a> = &'a str>,
+        E: Exchange<K::ElementClose, Output<'a> = &'a str>,
+        E: Exchange<K::ElementCloseSuffix, Output<'a> = &'a str>,
+        E: Exchange<K::AttributeStart, Output<'a> = &'a str>,
+        E: Exchange<K::AttributeStartSuffix, Output<'a> = &'a str>,
+        E: Exchange<K::AttributeValueLiteral, Output<'a> = Streaming<&'a str>>,
+        E: Exchange<K::AttributeValueReferenceNamed, Output<'a> = &'a str>,
+        E: Exchange<K::AttributeValueReferenceDecimal, Output<'a> = &'a str>,
+        E: Exchange<K::AttributeValueReferenceHex, Output<'a> = &'a str>,
+        E: Exchange<K::ReferenceNamed, Output<'a> = &'a str>,
+        E: Exchange<K::ReferenceDecimal, Output<'a> = &'a str>,
+        E: Exchange<K::ReferenceHex, Output<'a> = &'a str>,
+        E: Exchange<K::ProcessingInstructionStart, Output<'a> = &'a str>,
+        E: Exchange<K::CharData, Output<'a> = Streaming<&'a str>>,
+        E: Exchange<K::CData, Output<'a> = Streaming<&'a str>>,
     {
         use token::Token::*;
 
@@ -124,48 +114,56 @@ impl ValidatorCore {
             ..
         } = self;
 
-        match &token {
-            DeclarationStart(v) => {
+        let token = match token {
+            DeclarationStart(i) => {
                 if self.count != 0 {
                     return DeclarationOnlyAllowedAtStartSnafu.fail();
                 }
 
-                let v = v.as_fused_str();
-
+                let v = exchanger.exchange(i);
                 ensure!(v == "1.0", InvalidDeclarationVersionSnafu { version: v });
+
+                DeclarationStart(i)
             }
 
-            DeclarationEncoding(v) => {
+            DeclarationEncoding(i) => {
                 static VALID_ENCODING_STRING: Lazy<Regex> =
                     Lazy::new(|| Regex::new(r#"\A[A-Za-z]([A-Za-z0-9._]|'-')*\z"#).unwrap());
 
-                let v = v.as_fused_str();
+                let v = exchanger.exchange(i);
 
                 ensure!(
                     VALID_ENCODING_STRING.is_match(v),
                     InvalidDeclarationEncodingSnafu { encoding: v }
                 );
+
+                DeclarationEncoding(i)
             }
 
-            DeclarationStandalone(v) => {
-                let v = v.as_fused_str();
+            DeclarationStandalone(i) => {
+                let v = exchanger.exchange(i);
 
                 ensure!(
                     matches!(v, "yes" | "no"),
                     InvalidDeclarationStandaloneSnafu { standalone: v }
                 );
+
+                DeclarationStandalone(i)
             }
 
-            ElementOpenStart(v) => {
-                let v = v.as_fused_str();
+            ElementOpenStart(i) => {
+                let v = exchanger.exchange(i);
 
                 ensure!(!v.is_empty(), ElementNameEmptySnafu);
 
-                *pending_element_open_start_name = Some(QNameBuilder::new(arena.intern(v)));
+                let v = arena.intern(v);
+                *pending_element_open_start_name = Some(QNameBuilder::new(v));
+
+                ElementOpenStart(v)
             }
 
-            ElementOpenStartSuffix(v) => {
-                let v = v.as_fused_str();
+            ElementOpenStartSuffix(i) => {
+                let v = exchanger.exchange(i);
 
                 ensure!(!v.is_empty(), ElementNameSuffixEmptySnafu);
 
@@ -177,22 +175,28 @@ impl ValidatorCore {
                 let name = pending.push(local_part);
 
                 self.finish_element_open_start(name)?;
+
+                ElementOpenStartSuffix(local_part)
             }
 
             ElementSelfClose => {
                 element_stack
                     .pop()
                     .context(ElementSelfClosedWithoutOpenSnafu)?;
+
+                ElementSelfClose
             }
 
-            ElementClose(v) => {
-                let v = v.as_fused_str();
+            ElementClose(i) => {
+                let v = exchanger.exchange(i);
                 let v = arena.intern(v);
                 *pending_element_close_name = Some(QNameBuilder::new(v));
+
+                ElementClose(v)
             }
 
-            ElementCloseSuffix(v) => {
-                let v = v.as_fused_str();
+            ElementCloseSuffix(i) => {
+                let v = exchanger.exchange(i);
 
                 let pending = pending_element_close_name
                     .take()
@@ -202,19 +206,26 @@ impl ValidatorCore {
                 let name = pending.push(local_part);
 
                 self.finish_element_close(name)?;
+
+                ElementCloseSuffix(local_part)
             }
 
-            AttributeStart(v) => {
-                let v = v.as_fused_str();
+            AttributeStart(i) => {
+                let v = exchanger.exchange(i);
 
                 ensure!(!v.is_empty(), AttributeNameEmptySnafu);
 
-                *pending_attribute_name = Some(QNameBuilder::new(arena.intern(v)));
                 *is_xmlns = (v == "xmlns").then_some(XmlNsKind::Default);
                 *attribute_value_had_content = false;
+
+                let v = arena.intern(v);
+                *pending_attribute_name = Some(QNameBuilder::new(v));
+
+                AttributeStart(v)
             }
-            AttributeStartSuffix(v) => {
-                let v = v.as_fused_str();
+
+            AttributeStartSuffix(i) => {
+                let v = exchanger.exchange(i);
 
                 ensure!(!v.is_empty(), AttributeNameSuffixEmptySnafu);
 
@@ -230,36 +241,45 @@ impl ValidatorCore {
                 }
 
                 self.finish_attribute_start(name)?;
+
+                AttributeStartSuffix(local_part)
             }
 
-            AttributeValueLiteral(v) => {
-                let v = v.as_ref();
+            AttributeValueLiteral(i) => {
+                let v = *exchanger.exchange(i).unify();
                 if !v.is_empty() {
                     *attribute_value_had_content = true;
                 }
+
+                AttributeValueLiteral(i)
             }
 
-            AttributeValueReferenceNamed(v) => {
-                let v = v.as_fused_str();
+            AttributeValueReferenceNamed(i) => {
+                let v = exchanger.exchange(i);
                 ensure!(
                     known_entity(v),
                     AttributeValueReferenceNamedUnknownSnafu { text: v }
                 );
                 *attribute_value_had_content = true;
+
+                AttributeValueReferenceNamed(i)
             }
 
-            AttributeValueReferenceDecimal(v) => {
-                let v = v.as_fused_str();
-                // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 10).context(InvalidAttributeValueReferenceDecimalSnafu)?;
+            AttributeValueReferenceDecimal(i) => {
+                let v = exchanger.exchange(i);
+                let v =
+                    reference_value(v, 10).context(InvalidAttributeValueReferenceDecimalSnafu)?;
                 *attribute_value_had_content = true;
+
+                AttributeValueReferenceDecimal(v)
             }
 
-            AttributeValueReferenceHex(v) => {
-                let v = v.as_fused_str();
-                // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 16).context(InvalidAttributeValueReferenceHexSnafu)?;
+            AttributeValueReferenceHex(i) => {
+                let v = exchanger.exchange(i);
+                let v = reference_value(v, 16).context(InvalidAttributeValueReferenceHexSnafu)?;
                 *attribute_value_had_content = true;
+
+                AttributeValueReferenceHex(v)
             }
 
             AttributeValueEnd => {
@@ -268,65 +288,90 @@ impl ValidatorCore {
                     v == XmlNsKind::Default || *attribute_value_had_content
                 });
                 ensure!(is_valid, NamespaceEmptySnafu);
+
+                AttributeValueEnd
             }
 
-            CharData(v) => {
-                let v = v.as_ref();
+            CharData(i) => {
+                let v = *exchanger.exchange(i).unify();
                 ensure!(
                     !element_stack.is_empty() || v.is_xml_space(),
                     CharDataOutsideOfElementSnafu { text: v }
                 );
+
+                CharData(i)
             }
-            CData(v) => {
-                let v = v.as_ref();
+
+            CData(i) => {
+                let v = *exchanger.exchange(i).unify();
                 ensure!(
                     !element_stack.is_empty(),
                     CDataOutsideOfElementSnafu { text: v }
                 );
+
+                CData(i)
             }
 
-            ReferenceNamed(v) => {
-                let v = v.as_fused_str();
+            ReferenceNamed(i) => {
+                let v = exchanger.exchange(i);
                 ensure!(
                     !element_stack.is_empty(),
                     ReferenceNamedOutsideOfElementSnafu { text: v }
                 );
                 ensure!(known_entity(v), ReferenceNamedUnknownSnafu { text: v });
+
+                ReferenceNamed(i)
             }
-            ReferenceDecimal(v) => {
-                let v = v.as_fused_str();
+
+            ReferenceDecimal(i) => {
+                let v = exchanger.exchange(i);
                 ensure!(
                     !element_stack.is_empty(),
                     ReferenceDecimalOutsideOfElementSnafu { text: v }
                 );
-                // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 10).context(InvalidReferenceDecimalSnafu)?;
+
+                let v = reference_value(v, 10).context(InvalidReferenceDecimalSnafu)?;
+
+                ReferenceDecimal(v)
             }
-            ReferenceHex(v) => {
-                let v = v.as_fused_str();
+
+            ReferenceHex(i) => {
+                let v = exchanger.exchange(i);
                 ensure!(
                     !element_stack.is_empty(),
                     ReferenceHexOutsideOfElementSnafu { text: v }
                 );
-                // TODO: Avoid performing this transformation at multiple layers
-                reference_value(v, 16).context(InvalidReferenceHexSnafu)?;
+
+                let v = reference_value(v, 16).context(InvalidReferenceHexSnafu)?;
+
+                ReferenceHex(v)
             }
 
-            ProcessingInstructionStart(v) => {
-                let v = v.as_fused_str();
+            ProcessingInstructionStart(i) => {
+                let v = exchanger.exchange(i);
                 ensure!(!v.is_empty(), ProcessingInstructionNameEmptySnafu);
                 ensure!(
                     !v.eq_ignore_ascii_case("xml"),
                     ProcessingInstructionInvalidNameSnafu { name: v }
                 );
+
+                ProcessingInstructionStart(i)
             }
 
-            _ => {}
+            // no validations needed
+            DeclarationClose => DeclarationClose,
+            ElementOpenStartComplete => ElementOpenStartComplete,
+            ElementOpenEnd => ElementOpenEnd,
+            ElementCloseComplete => ElementCloseComplete,
+            AttributeStartComplete => AttributeStartComplete,
+            ProcessingInstructionValue(i) => ProcessingInstructionValue(i),
+            ProcessingInstructionEnd => ProcessingInstructionEnd,
+            Comment(i) => Comment(i),
         };
 
         self.count += 1;
 
-        Ok(())
+        Ok(token)
     }
 
     fn flush_element_open_start(&mut self) -> Result<()> {
@@ -344,7 +389,6 @@ impl ValidatorCore {
             seen_one_element,
             element_stack,
             attributes,
-            arena,
             ..
         } = self;
 
@@ -352,7 +396,7 @@ impl ValidatorCore {
             ensure!(
                 !*seen_one_element,
                 MultipleTopLevelElementsSnafu {
-                    name: arena.exchange(name)
+                    name: self.exchange(name)
                 }
             );
             *seen_one_element = true;
@@ -375,18 +419,14 @@ impl ValidatorCore {
     }
 
     fn finish_element_close(&mut self, close: QName<CheckedKey>) -> Result<()> {
-        let Self {
-            element_stack,
-            arena,
-            ..
-        } = self;
+        let Self { element_stack, .. } = self;
 
         let open = element_stack.pop().context(ElementClosedWithoutOpenSnafu)?;
         ensure!(
             open == close,
             ElementOpenAndCloseMismatchedSnafu {
-                open: arena.exchange(open),
-                close: arena.exchange(close),
+                open: self.exchange(open),
+                close: self.exchange(close),
             },
         );
 
@@ -404,14 +444,12 @@ impl ValidatorCore {
     }
 
     fn finish_attribute_start(&mut self, name: QName<CheckedKey>) -> Result<()> {
-        let Self {
-            attributes, arena, ..
-        } = self;
+        let Self { attributes, .. } = self;
 
         ensure!(
             attributes.insert(name),
             AttributeDuplicateSnafu {
-                name: arena.exchange(name),
+                name: self.exchange(name),
             },
         );
 
@@ -424,20 +462,27 @@ impl ValidatorCore {
         self.flush_attribute_start()?;
 
         let Self {
-            arena,
             element_stack,
             seen_one_element,
             ..
         } = self;
 
         if let Some(opened) = element_stack.pop() {
-            let name = arena.exchange(opened);
+            let name = self.exchange(opened);
             return ElementOpenedWithoutCloseSnafu { name }.fail();
         }
 
         ensure!(*seen_one_element, NoTopLevelElementsSnafu);
 
         Ok(())
+    }
+}
+
+impl Exchange<QName<CheckedKey>> for ValidatorCore {
+    type Output<'a> = QName<&'a str>;
+
+    fn exchange(&self, idx: QName<CheckedKey>) -> Self::Output<'_> {
+        idx.map(|i| &self.arena[i])
     }
 }
 
@@ -487,8 +532,16 @@ where
             core: Default::default(),
         }
     }
+}
 
-    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken>> {
+impl<R: Read> token::Source for Validator<R> {
+    type IndexKind = ValidIndexKind;
+    type StrKind<'a> = ValidKind<'a>
+    where
+        Self: 'a;
+    type Error = Error;
+
+    fn next_index(&mut self) -> Option<Result<ValidIndexToken>> {
         let Self { parser, core } = self;
 
         match parser.next_index() {
@@ -496,24 +549,141 @@ where
                 Ok(()) => None,
                 Err(e) => Some(Err(e)),
             },
-            Some(Ok(v)) => {
-                let v2 = parser.exchange(v);
-
-                match core.push(v2) {
-                    Ok(()) => Some(Ok(v)),
-                    Err(e) => Some(Err(e)),
-                }
-            }
+            Some(Ok(v)) => match core.push(v, parser) {
+                Ok(v) => Some(Ok(v)),
+                Err(e) => Some(Err(e)),
+            },
             Some(Err(e)) => Some(Err(e.into())),
         }
     }
 
-    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>>> {
-        let v = self.next_index();
-        let parser = &self.parser;
-        v.map(|r| r.map(|t| parser.exchange(t)))
+    fn next_str(&mut self) -> Option<Result<ValidToken<'_>>> {
+        self.next_index()
+            .map(|r| r.map(|t| t.exchange_through(self)))
     }
 }
+
+impl<R> Validator<R> {
+    pub fn arena(&self) -> &CheckedArena {
+        &self.core.arena
+    }
+
+    pub fn into_arena(self) -> CheckedArena {
+        self.core.arena
+    }
+}
+
+impl<R> token::Exchange<CheckedKey> for Validator<R> {
+    type Output<'a> = &'a str
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: CheckedKey) -> Self::Output<'_> {
+        &self.core.arena[idx]
+    }
+}
+
+impl<R> token::Exchange<char> for Validator<R> {
+    type Output<'a> = char
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: char) -> Self::Output<'_> {
+        idx
+    }
+}
+
+impl<R> token::Exchange<FusedIndex> for Validator<R> {
+    type Output<'a> = &'a str
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: FusedIndex) -> Self::Output<'_> {
+        self.parser.exchange(idx)
+    }
+}
+
+impl<R> token::Exchange<usize> for Validator<R> {
+    type Output<'a> = &'a str
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: usize) -> Self::Output<'_> {
+        self.parser.exchange(idx)
+    }
+}
+
+impl<R> token::Exchange<Streaming<usize>> for Validator<R> {
+    type Output<'a> = Streaming<&'a str>
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: Streaming<usize>) -> Self::Output<'_> {
+        self.parser.exchange(idx)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ValidIndexKind<K = pull_parser::FusedIndexKind>(K)
+where
+    K: TokenKind;
+
+impl<K: TokenKind> TokenKind for ValidIndexKind<K> {
+    type DeclarationStart = K::DeclarationStart;
+    type DeclarationEncoding = K::DeclarationEncoding;
+    type DeclarationStandalone = K::DeclarationStandalone;
+    type ElementOpenStart = CheckedKey;
+    type ElementOpenStartSuffix = CheckedKey;
+    type ElementClose = CheckedKey;
+    type ElementCloseSuffix = CheckedKey;
+    type AttributeStart = CheckedKey;
+    type AttributeStartSuffix = CheckedKey;
+    type AttributeValueLiteral = K::AttributeValueLiteral;
+    type AttributeValueReferenceNamed = K::AttributeValueReferenceNamed;
+    type AttributeValueReferenceDecimal = char;
+    type AttributeValueReferenceHex = char;
+    type CharData = K::CharData;
+    type CData = K::CData;
+    type ReferenceNamed = K::ReferenceNamed;
+    type ReferenceDecimal = char;
+    type ReferenceHex = char;
+    type ProcessingInstructionStart = K::ProcessingInstructionStart;
+    type ProcessingInstructionValue = K::ProcessingInstructionValue;
+    type Comment = K::Comment;
+}
+
+pub type ValidIndexToken<K = pull_parser::FusedIndexKind> = Token<ValidIndexKind<K>>;
+
+#[derive(Debug, Copy, Clone)]
+pub struct ValidKind<'a, K = pull_parser::FusedKind<'a>>(PhantomData<&'a str>, K)
+where
+    K: TokenKind;
+
+impl<'a, K: TokenKind> TokenKind for ValidKind<'a, K> {
+    type DeclarationStart = K::DeclarationStart;
+    type DeclarationEncoding = K::DeclarationEncoding;
+    type DeclarationStandalone = K::DeclarationStandalone;
+    type ElementOpenStart = &'a str;
+    type ElementOpenStartSuffix = &'a str;
+    type ElementClose = &'a str;
+    type ElementCloseSuffix = &'a str;
+    type AttributeStart = &'a str;
+    type AttributeStartSuffix = &'a str;
+    type AttributeValueLiteral = K::AttributeValueLiteral;
+    type AttributeValueReferenceNamed = K::AttributeValueReferenceNamed;
+    type AttributeValueReferenceDecimal = char;
+    type AttributeValueReferenceHex = char;
+    type CharData = K::CharData;
+    type CData = K::CData;
+    type ReferenceNamed = K::ReferenceNamed;
+    type ReferenceDecimal = char;
+    type ReferenceHex = char;
+    type ProcessingInstructionStart = K::ProcessingInstructionStart;
+    type ProcessingInstructionValue = K::ProcessingInstructionValue;
+    type Comment = K::Comment;
+}
+
+pub type ValidToken<'a, K = pull_parser::FusedKind<'a>> = Token<ValidKind<'a, K>>;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -618,7 +788,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[cfg(test)]
 mod test {
     use super::*;
-    use token::{Token::*, UniformToken};
+    use token::{Streaming::*, Token::*};
 
     macro_rules! assert_ok {
         ($e:expr) => {
@@ -684,14 +854,14 @@ mod test {
 
     #[test]
     fn fail_char_data_outside_element_if_not_whitespace() {
-        let e = ValidatorCore::validate_all(vec![CharData("a")]);
+        let e = ValidatorCore::validate_all(vec![CharData(Complete("a"))]);
 
         assert_error!(&e, Error::CharDataOutsideOfElement { text } if text == "a");
     }
 
     #[test]
     fn fail_cdata_outside_element() {
-        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), CData("a")]);
+        let e = ValidatorCore::validate_all(vec![DeclarationStart("1.0"), CData(Complete("a"))]);
 
         assert_error!(&e, Error::CDataOutsideOfElement { text } if text == "a");
     }
@@ -893,9 +1063,9 @@ mod test {
         let e = ValidatorCore::validate_all(vec![
             ElementOpenStart("a"),
             AttributeStart("b"),
-            AttributeValueLiteral("c"),
+            AttributeValueLiteral(Complete("c")),
             AttributeStart("b"),
-            AttributeValueLiteral("d"),
+            AttributeValueLiteral(Complete("d")),
             ElementSelfClose,
         ]);
 
@@ -908,10 +1078,10 @@ mod test {
             ElementOpenStart("a"),
             AttributeStart("b"),
             AttributeStartSuffix("x"),
-            AttributeValueLiteral("c"),
+            AttributeValueLiteral(Complete("c")),
             AttributeStart("b"),
             AttributeStartSuffix("y"),
-            AttributeValueLiteral("d"),
+            AttributeValueLiteral(Complete("d")),
             ElementSelfClose,
         ]);
 
@@ -938,7 +1108,7 @@ mod test {
             AttributeStart("xmlns"),
             AttributeStartSuffix("b"),
             AttributeStartComplete,
-            AttributeValueLiteral("uri"),
+            AttributeValueLiteral(Complete("uri")),
             AttributeValueEnd,
             ElementSelfClose,
         ]);
@@ -969,7 +1139,7 @@ mod test {
     #[test]
     fn may_start_with_whitespace() {
         let e = ValidatorCore::validate_all(vec![
-            CharData(" \r\n\t"),
+            CharData(Complete(" \r\n\t")),
             ElementOpenStart("element"),
             ElementSelfClose,
         ]);
@@ -1072,13 +1242,57 @@ mod test {
         }
     }
 
+    struct ShimTokenKind<'a>(PhantomData<&'a str>);
+
+    impl<'a> TokenKind for ShimTokenKind<'a> {
+        type DeclarationStart = &'a str;
+        type DeclarationEncoding = &'a str;
+        type DeclarationStandalone = &'a str;
+        type ElementOpenStart = &'a str;
+        type ElementOpenStartSuffix = &'a str;
+        type ElementClose = &'a str;
+        type ElementCloseSuffix = &'a str;
+        type AttributeStart = &'a str;
+        type AttributeStartSuffix = &'a str;
+        type AttributeValueLiteral = Streaming<&'a str>;
+        type AttributeValueReferenceNamed = &'a str;
+        type AttributeValueReferenceDecimal = &'a str;
+        type AttributeValueReferenceHex = &'a str;
+        type CharData = Streaming<&'a str>;
+        type CData = Streaming<&'a str>;
+        type ReferenceNamed = &'a str;
+        type ReferenceDecimal = &'a str;
+        type ReferenceHex = &'a str;
+        type ProcessingInstructionStart = &'a str;
+        type ProcessingInstructionValue = &'a str;
+        type Comment = &'a str;
+    }
+
+    type ShimToken<'a> = Token<ShimTokenKind<'a>>;
+
+    struct Shim;
+
+    impl<'b> Exchange<&'b str> for Shim {
+        type Output<'a> = &'b str;
+
+        fn exchange(&self, idx: &'b str) -> Self::Output<'_> {
+            idx
+        }
+    }
+
+    impl<'b> Exchange<Streaming<&'b str>> for Shim {
+        type Output<'a> = Streaming<&'b str>;
+
+        fn exchange(&self, idx: Streaming<&'b str>) -> Self::Output<'_> {
+            idx
+        }
+    }
+
     impl ValidatorCore {
-        fn validate_all<'a>(
-            tokens: impl IntoIterator<Item = UniformToken<&'a str>>,
-        ) -> super::Result<()> {
+        fn validate_all<'a>(tokens: impl IntoIterator<Item = ShimToken<'a>>) -> super::Result<()> {
             let mut me = Self::default();
             for token in tokens {
-                me.push(token)?;
+                me.push(token, &Shim)?;
             }
             me.finish()
         }

@@ -6,6 +6,22 @@ include!(concat!(env!("OUT_DIR"), "/generated_token.rs"));
 
 pub type UniformToken<T> = Token<UniformKind<T>>;
 
+pub trait Source {
+    type IndexKind: TokenKind;
+    type StrKind<'a>: TokenKind
+    where
+        Self: 'a;
+    type Error: std::error::Error + 'static;
+
+    // This method (and similar methods that return `usize` or other
+    // non-reference types) are a workaround for the current
+    // limitations of the borrow checker. If Polonius is ever merged,
+    // this can be simplified.
+    fn next_index(&mut self) -> Option<Result<Token<Self::IndexKind>, Self::Error>>;
+
+    fn next_str(&mut self) -> Option<Result<Token<Self::StrKind<'_>>, Self::Error>>;
+}
+
 pub trait IsComplete {
     fn is_complete(&self) -> bool;
 }
@@ -27,6 +43,13 @@ impl IsComplete for str {
     }
 }
 
+impl IsComplete for char {
+    #[inline]
+    fn is_complete(&self) -> bool {
+        panic!("This is a hack; `char` should not be formatted directly")
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq)]
 pub enum Streaming<T> {
     Partial(T),
@@ -34,6 +57,16 @@ pub enum Streaming<T> {
 }
 
 impl<T> Streaming<T> {
+    #[inline]
+    pub fn into_complete(self) -> Option<T> {
+        use Streaming::*;
+
+        match self {
+            Partial(_) => None,
+            Complete(v) => Some(v),
+        }
+    }
+
     #[inline]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Streaming<U> {
         use Streaming::*;
@@ -96,4 +129,16 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.unify().fmt(f)
     }
+}
+
+/// Many producers of tokens return an "index" — a value which doesn't
+/// contain a reference. Consumers of tokens want to work with a
+/// `&str` (raw or wrapped). This allows exchanging the index for a
+/// string-like type.
+pub trait Exchange<I> {
+    type Output<'a>
+    where
+        Self: 'a;
+
+    fn exchange(&self, idx: I) -> Self::Output<'_>;
 }

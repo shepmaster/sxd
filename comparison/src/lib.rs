@@ -5,6 +5,7 @@ pub use sxd_pull_parser;
 pub use sxd_validation;
 
 use sxd_pull_parser::Parser;
+use sxd_token::Source;
 use sxd_validation::Validator;
 
 pub type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;

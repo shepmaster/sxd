@@ -1,5 +1,6 @@
 use pull_parser::Parser;
 use sxd_validation::Validator;
+use token::Source;
 
 fn filename() -> &'static str {
     option_env!("FILE").unwrap_or("examples/standard.xml")

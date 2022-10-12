@@ -1,0 +1,20 @@
+[package]
+name = "sxd-document"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
+string-slab = { package = "sxd-string-slab", path = "../string-slab" }
+token = { package = "sxd-token", path = "../token" }
+util = { package = "sxd-util", path = "../util" }
+validation = { package = "sxd-validation", path = "../validation" }
+
+snafu = "0.7"
+thunderdome = { version = "0.5.0", default-features = false }
+ouroboros = { version = "0.15.0", default-features = false }
+
+[dev-dependencies]
+proptest = "1.0.0"

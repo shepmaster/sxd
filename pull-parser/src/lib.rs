@@ -3,7 +3,7 @@
 use easy_ext::ext;
 use snafu::{ensure, Snafu};
 use std::{io::Read, marker::PhantomData, mem, str};
-use token::{IsComplete, Streaming, Token, TokenKind, UniformToken};
+use token::{Exchange, IsComplete, Streaming, Token, TokenKind, UniformKind, UniformToken};
 
 #[macro_use]
 mod macros;
@@ -632,6 +632,7 @@ impl AsRef<str> for Quote {
     }
 }
 
+type IndexKind = UniformKind<Streaming<usize>>;
 type IndexToken = UniformToken<Streaming<usize>>;
 type RollbackState = (usize, usize);
 
@@ -734,10 +735,6 @@ impl CoreParser {
 
     pub fn as_str(&self) -> &str {
         self.buffer.as_str()
-    }
-
-    pub fn exchange(&self, idx: usize) -> &str {
-        &self.as_str()[..idx]
     }
 
     pub fn refill_using<E>(
@@ -1498,6 +1495,22 @@ impl CoreParser {
     }
 }
 
+impl Exchange<usize> for CoreParser {
+    type Output<'a> = &'a str;
+
+    fn exchange(&self, idx: usize) -> Self::Output<'_> {
+        &self.as_str()[..idx]
+    }
+}
+
+impl Exchange<Streaming<usize>> for CoreParser {
+    type Output<'a> = Streaming<&'a str>;
+
+    fn exchange(&self, idx: Streaming<usize>) -> Self::Output<'_> {
+        idx.map(|i| self.exchange(i))
+    }
+}
+
 // https://github.com/rust-lang/rust/issues/78149
 #[must_use]
 #[derive(Debug)]
@@ -1644,12 +1657,16 @@ where
             exhausted: false,
         }
     }
+}
 
-    // This method (and similar methods that return `usize` or other
-    // non-reference types) are a workaround for the current
-    // limitations of the borrow checker. If Polonius is ever merged,
-    // this can be simplified.
-    pub fn next_index(&mut self) -> Option<Result<IndexToken>> {
+impl<R: Read> token::Source for Parser<R> {
+    type IndexKind = IndexKind;
+    type StrKind<'a> = UniformKind<Streaming<&'a str>>
+    where
+        Self: 'a;
+    type Error = Error;
+
+    fn next_index(&mut self) -> Option<Result<IndexToken>> {
         let Self {
             parser,
             source,
@@ -1684,9 +1701,19 @@ where
         }
     }
 
-    pub fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
-        let v = self.next_index();
-        v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.parser.exchange(idx)))))
+    fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
+        self.next_index()
+            .map(|r| r.map(|t| t.exchange_through(self)))
+    }
+}
+
+impl<R> Exchange<Streaming<usize>> for Parser<R> {
+    type Output<'a> = Streaming<&'a str>
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: Streaming<usize>) -> Self::Output<'_> {
+        self.parser.exchange(idx)
     }
 }
 
@@ -1766,16 +1793,6 @@ impl<'a> TokenKind for FusedKind<'a> {
 
 pub type FusedToken<'a> = Token<FusedKind<'a>>;
 
-trait Exchange {
-    fn exchange(&self, idx: usize) -> &str;
-}
-
-impl Exchange for CoreParser {
-    fn exchange(&self, idx: usize) -> &str {
-        Self::exchange(self, idx)
-    }
-}
-
 #[derive(Debug, Default)]
 struct FuseCore {
     buffer: String,
@@ -1783,7 +1800,11 @@ struct FuseCore {
 }
 
 impl FuseCore {
-    fn push(&mut self, t: IndexToken, parser: &impl Exchange) -> Option<FusedIndexToken> {
+    fn push<'a>(
+        &mut self,
+        t: IndexToken,
+        parser: &'a impl Exchange<usize, Output<'a> = &'a str>,
+    ) -> Option<FusedIndexToken> {
         use {FusedIndex::*, Streaming::*, Token::*};
 
         let Self { buffer, current } = self;
@@ -1857,8 +1878,16 @@ where
             core: Default::default(),
         }
     }
+}
 
-    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken, FuseError>> {
+impl<R: Read> token::Source for Fuse<R> {
+    type IndexKind = FusedIndexKind;
+    type StrKind<'a> = FusedKind<'a>
+    where
+        Self: 'a;
+    type Error = FuseError;
+
+    fn next_index(&mut self) -> Option<Result<FusedIndexToken, FuseError>> {
         let Self { inner, core } = self;
         while let Some(t) = inner.next_index() {
             match t {
@@ -1877,37 +1906,42 @@ where
         }
     }
 
-    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
-        let v = self.next_index();
-        v.map(move |r| r.map(move |t| self.exchange(t)))
+    fn next_str(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
+        self.next_index()
+            .map(|r| r.map(|t| t.exchange_through(self)))
     }
+}
 
-    pub fn exchange(&self, token: FusedIndexToken) -> FusedToken<'_> {
-        use {FusedIndex::*, Token::*};
+impl<R> Exchange<FusedIndex> for Fuse<R> {
+    type Output<'a> = &'a str
+    where
+        R: 'a;
 
-        macro_rules! exchange_match {
-            ($($tt:tt $name:ident,)*) => {
-                match token {
-                    $( exchange_match!(@pat $tt $name s) => exchange_match!(@arm $tt $name s), )*
-                }
-            };
-
-            (@pat pass $name:ident $s:ident) => { $name };
-            (@arm pass $name:ident $s:ident) => { $name };
-
-            (@pat fuse $name:ident $s:ident) => { $name($s) };
-            (@arm fuse $name:ident $s:ident) => {
-                match $s {
-                    Buffered => $name(&*self.core.buffer),
-                    Direct(idx) => $name(self.inner.parser.exchange(idx)),
-                }
-            };
-
-            (@pat stream $name:ident $s:ident) => { $name($s) };
-            (@arm stream $name:ident $s:ident) => { $name($s.map(|i| self.inner.parser.exchange(i))) };
+    fn exchange(&self, idx: FusedIndex) -> Self::Output<'_> {
+        match idx {
+            FusedIndex::Buffered => &self.core.buffer,
+            FusedIndex::Direct(idx) => self.inner.parser.exchange(idx),
         }
+    }
+}
 
-        fuse_invoke!(exchange_match)
+impl<R> Exchange<usize> for Fuse<R> {
+    type Output<'a> = &'a str
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: usize) -> Self::Output<'_> {
+        self.inner.parser.exchange(idx)
+    }
+}
+
+impl<R> Exchange<Streaming<usize>> for Fuse<R> {
+    type Output<'a> = Streaming<&'a str>
+    where
+        R: 'a;
+
+    fn exchange(&self, idx: Streaming<usize>) -> Self::Output<'_> {
+        idx.map(|i| self.exchange(i))
     }
 }
 
@@ -1924,6 +1958,7 @@ pub enum FuseError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use token::Source;
     use {Streaming::*, Token::*};
 
     type BoxError = Box<dyn std::error::Error>;
@@ -2941,32 +2976,33 @@ mod test {
 
     #[ext]
     impl FusedOwnedToken {
-        fn from_index(token: FusedIndexToken, buffer: &str, source: &impl Exchange) -> Self {
-            use FusedIndex::*;
+        fn from_index(token: FusedIndexToken, buffer: &str, source: &BufferedParser<'_>) -> Self {
+            struct OwningShim<'a>(&'a str, &'a BufferedParser<'a>);
 
-            macro_rules! fuse_all_match {
-                ($($tt:tt $name:ident,)*) => {
-                    match token {
-                        $( fuse_all_match!(@pat $tt $name s) => fuse_all_match!(@arm $tt $name s), )*
-                    }
-                };
+            impl Exchange<Streaming<usize>> for OwningShim<'_> {
+                type Output<'a> = Streaming<String>
+                where
+                    Self: 'a;
 
-                (@pat pass $name:ident $s:ident) => { $name };
-                (@arm pass $name:ident $s:ident) => { $name };
-
-                (@pat fuse $name:ident $s:ident) => { $name($s) };
-                (@arm fuse $name:ident $s:ident) => {
-                    match $s {
-                        Buffered => $name(buffer.to_string()),
-                        Direct(idx) => $name(source.exchange(idx).to_string()),
-                    }
-                };
-
-                (@pat stream $name:ident $s:ident) => { $name($s) };
-                (@arm stream $name:ident $s:ident) => { $name($s.map(|i| source.exchange(i).to_string())) };
+                fn exchange(&self, idx: Streaming<usize>) -> Self::Output<'_> {
+                    idx.map(|i| self.1.exchange(i).to_owned())
+                }
             }
 
-            fuse_invoke!(fuse_all_match)
+            impl Exchange<FusedIndex> for OwningShim<'_> {
+                type Output<'a> = String
+                where
+                    Self: 'a;
+
+                fn exchange(&self, idx: FusedIndex) -> Self::Output<'_> {
+                    match idx {
+                        FusedIndex::Buffered => self.0.to_owned(),
+                        FusedIndex::Direct(idx) => self.1.exchange(idx).to_owned(),
+                    }
+                }
+            }
+
+            token.exchange_through(&OwningShim(buffer, source))
         }
     }
 
@@ -2997,8 +3033,12 @@ mod test {
         }
     }
 
-    impl Exchange for BufferedParser<'_> {
-        fn exchange(&self, idx: usize) -> &str {
+    impl Exchange<usize> for BufferedParser<'_> {
+        type Output<'a> = &'a str
+        where
+            Self: 'a;
+
+        fn exchange(&self, idx: usize) -> Self::Output<'_> {
             self.0[idx]
         }
     }

@@ -215,6 +215,7 @@ fn main() -> Result<()> {
         writeln!(f, "{}", generate_token_kind())?;
         writeln!(f, "{}", generate_token())?;
         writeln!(f, "{}", generate_token_inherent())?;
+        writeln!(f, "{}", generate_token_uniform_inherent())?;
         writeln!(f, "{}", generate_token_partialeq())?;
         writeln!(f, "{}", generate_uniform_kind())?;
 
@@ -271,6 +272,43 @@ fn generate_token() -> proc_macro2::TokenStream {
 }
 
 fn generate_token_inherent() -> proc_macro2::TokenStream {
+    let requirements = defs_with_data().map(|&d| {
+        let name = d.name_ident();
+
+        quote! { E: Exchange<K1::#name, Output<'a> = K2::#name> }
+    });
+
+    let arms = TOKEN_DEFS.iter().map(|&d| {
+        let TokenDef { has_data, .. } = d;
+        let name = d.name_ident();
+
+        if has_data {
+            quote! { Token::#name(v) => Token::#name(exchanger.exchange(v)) }
+        } else {
+            quote! { Token::#name => Token::#name }
+        }
+    });
+
+    quote! {
+        impl<K1> Token<K1>
+        where
+            K1: TokenKind,
+        {
+            #[inline]
+            pub fn exchange_through<'a, E, K2>(self, exchanger: &'a E) -> Token<K2>
+            where
+                K2: TokenKind,
+                #(#requirements,)*
+            {
+                match self {
+                    #(#arms,)*
+                }
+            }
+        }
+    }
+}
+
+fn generate_token_uniform_inherent() -> proc_macro2::TokenStream {
     let k1_requirements = defs_with_data().map(|&d| {
         let name = d.name_ident();
 
