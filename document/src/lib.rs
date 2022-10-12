@@ -122,11 +122,17 @@ struct CoreStorage {
 }
 
 impl CoreStorage {
-    fn create_element(&mut self, name: QName<UnsafeKey>) -> ElementIndex {
+    /// # Safety
+    ///
+    /// The caller must guarantee that the `UnsafeKey`s come from our `UnsafeArena`.
+    unsafe fn create_element(&mut self, name: QName<UnsafeKey>) -> ElementIndex {
         self.create_element_with(name, |_| {})
     }
 
-    fn create_element_with_parent(
+    /// # Safety
+    ///
+    /// The caller must guarantee that the `UnsafeKey`s come from our `UnsafeArena`.
+    unsafe fn create_element_with_parent(
         &mut self,
         name: QName<UnsafeKey>,
         parent: ParentIndex,
@@ -134,7 +140,10 @@ impl CoreStorage {
         self.create_element_with(name, |e| e.parent = Some(parent))
     }
 
-    fn create_element_with(
+    /// # Safety
+    ///
+    /// The caller must guarantee that the `UnsafeKey`s come from our `UnsafeArena`.
+    unsafe fn create_element_with(
         &mut self,
         name: QName<UnsafeKey>,
         f: impl FnOnce(&mut ElementStorage),
@@ -149,7 +158,10 @@ impl CoreStorage {
         ElementIndex(self.elements.insert(e))
     }
 
-    fn create_attribute_with_parent(
+    /// # Safety
+    ///
+    /// The caller must guarantee that the `UnsafeKey`s come from our `UnsafeArena`.
+    unsafe fn create_attribute_with_parent(
         &mut self,
         name: QName<UnsafeKey>,
         value: UnsafeKey,
@@ -241,10 +253,14 @@ impl CoreStorage {
     where
         S: AsRef<str>,
     {
-        let name = self.strings.intern_qname(name);
-        let value = self.strings.intern(value);
+        // SAFETY: The name and value's `UnsafeKey`s are trivially shown to come from our
+        // `UnsafeArena`.
+        let attr = unsafe {
+            let name = self.strings.intern_qname(name);
+            let value = self.strings.intern(value);
 
-        let attr = self.create_attribute_with_parent(name, value, index);
+            self.create_attribute_with_parent(name, value, index)
+        };
         self[index].attributes.push(attr);
 
         attr
@@ -535,13 +551,13 @@ index_enum! {
 
 // TODO: move methods to here from `Document`
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct DocumentRef<'a> {
-    storage: &'a Storage,
+struct DocumentRef<'s> {
+    storage: &'s Storage,
     index: DocumentIndex,
 }
 
-impl<'a> From<(&'a Storage, DocumentIndex)> for DocumentRef<'a> {
-    fn from(other: (&'a Storage, DocumentIndex)) -> Self {
+impl<'s> From<(&'s Storage, DocumentIndex)> for DocumentRef<'s> {
+    fn from(other: (&'s Storage, DocumentIndex)) -> Self {
         let (storage, index) = other;
         DocumentRef { storage, index }
     }
@@ -605,7 +621,10 @@ impl Document {
                         .copied()
                         .map(Into::into)
                         .unwrap_or(ParentIndex::DOCUMENT);
-                    let element = storage.create_element_with_parent(name, parent);
+
+                    // SAFETY: The name's `UnsafeKey` came from the `Validator`'s arena, which we
+                    // later take ownership of.
+                    let element = unsafe { storage.create_element_with_parent(name, parent) };
                     elements.push(element)
                 }
                 ElementOpenEnd => { /* no-op */ }
@@ -651,7 +670,10 @@ impl Document {
                         current_attribute_name.take(),
                         current_attribute_value.take(),
                     ) {
-                        let attribute = storage.create_attribute_with_parent(name, value, index);
+                        // SAFETY: The name and value's `UnsafeKey`s came from the `Validator`'s
+                        // arena, which we later take ownership of.
+                        let attribute =
+                            unsafe { storage.create_attribute_with_parent(name, value, index) };
                         storage[index].attributes.push(attribute);
                     }
                 }
@@ -698,6 +720,7 @@ impl Document {
         }
 
         // Steal the pre-interned data
+        // SAFETY: This is what allows above `unsafe` blocks to be safe.
         storage.strings = validator.into_arena().into_unsafe_arena();
 
         let storage = Storage(Rc::new(RefCell::new(storage)));
@@ -718,8 +741,11 @@ impl Document {
         S: AsRef<str>,
     {
         let mut storage = self.storage.0.borrow_mut();
-        let name = storage.strings.intern_qname(name);
-        let index = storage.create_element(name);
+        // SAFETY: The name's `UnsafeKey` is trivially shown to come from our `UnsafeArena`.
+        let index = unsafe {
+            let name = storage.strings.intern_qname(name);
+            storage.create_element(name)
+        };
         (&self.storage, index).into()
     }
 
@@ -774,13 +800,13 @@ impl Document {
 }
 
 #[derive(Debug)]
-pub struct Tokens<'a> {
-    storage: &'a CoreStorage,
-    output: vec::IntoIter<UniformToken<&'a str>>,
+pub struct Tokens<'s> {
+    storage: &'s CoreStorage,
+    output: vec::IntoIter<UniformToken<&'s str>>,
 }
 
-impl<'a> Tokens<'a> {
-    fn new(storage: &'a CoreStorage) -> Self {
+impl<'s> Tokens<'s> {
+    fn new(storage: &'s CoreStorage) -> Self {
         use Token as T;
 
         let mut output = vec![
@@ -798,41 +824,49 @@ impl<'a> Tokens<'a> {
         Self { storage, output }
     }
 
-    pub fn next_str(&mut self) -> Option<UniformToken<&'a str>> {
+    pub fn next_str(&mut self) -> Option<UniformToken<&'s str>> {
         self.output.next()
     }
 }
 
-fn one_element<'a>(
-    storage: &'a CoreStorage,
+fn one_element<'s>(
+    storage: &'s CoreStorage,
     e: ElementIndex,
-    output: &mut Vec<UniformToken<&'a str>>,
+    output: &mut Vec<UniformToken<&'s str>>,
 ) {
     use Token as T;
 
     let e = &storage[e];
-    one_qname(
-        e.name,
-        storage,
-        T::ElementOpenStart,
-        T::ElementOpenStartSuffix,
-        T::ElementOpenStartComplete,
-        output,
-    );
-    for &a_idx in &e.attributes {
-        let a = &storage[a_idx];
+
+    // SAFETY: The name's `UnsafeKey` came from this `UnsafeArena` by construction.
+    unsafe {
         one_qname(
-            a.name,
+            e.name,
             storage,
-            T::AttributeStart,
-            T::AttributeStartSuffix,
-            T::AttributeStartComplete,
+            T::ElementOpenStart,
+            T::ElementOpenStartSuffix,
+            T::ElementOpenStartComplete,
             output,
         );
+    }
+    for &a_idx in &e.attributes {
+        let a = &storage[a_idx];
 
-        // TODO: escaping of things here
-        unsafe { output.push(T::AttributeValueLiteral(storage.strings.as_str(a.value))) }
-        output.push(T::AttributeValueEnd);
+        // SAFETY: The name's `UnsafeKey` came from this `UnsafeArena` by construction.
+        unsafe {
+            one_qname(
+                a.name,
+                storage,
+                T::AttributeStart,
+                T::AttributeStartSuffix,
+                T::AttributeStartComplete,
+                output,
+            );
+
+            // TODO: escaping of things here
+            output.push(T::AttributeValueLiteral(storage.strings.as_str(a.value)));
+            output.push(T::AttributeValueEnd);
+        }
     }
     match &*e.children {
         [] => output.push(T::ElementSelfClose),
@@ -847,19 +881,22 @@ fn one_element<'a>(
                 }
             }
 
-            one_qname(
-                e.name,
-                storage,
-                T::ElementClose,
-                T::ElementCloseSuffix,
-                T::ElementCloseComplete,
-                output,
-            );
+            // SAFETY: The name's `UnsafeKey` came from this `UnsafeArena` by construction.
+            unsafe {
+                one_qname(
+                    e.name,
+                    storage,
+                    T::ElementClose,
+                    T::ElementCloseSuffix,
+                    T::ElementCloseComplete,
+                    output,
+                );
+            }
         }
     }
 }
 
-fn one_text<'a>(storage: &'a CoreStorage, t: TextIndex, output: &mut Vec<UniformToken<&'a str>>) {
+fn one_text<'s>(storage: &'s CoreStorage, t: TextIndex, output: &mut Vec<UniformToken<&'s str>>) {
     use Token as T;
 
     let t = &storage[t];
@@ -868,44 +905,45 @@ fn one_text<'a>(storage: &'a CoreStorage, t: TextIndex, output: &mut Vec<Uniform
     output.push(T::CharData(&*t.value))
 }
 
-fn one_qname<'a>(
+/// # Safety
+///
+/// The caller must enforce that the `UnsafeKey` comes from the `CoreStorage`'s `UnsafeArena`.
+unsafe fn one_qname<'s>(
     name: QName<UnsafeKey>,
-    storage: &'a CoreStorage,
-    a: fn(&'a str) -> UniformToken<&'a str>,
-    b: fn(&'a str) -> UniformToken<&'a str>,
-    c: UniformToken<&'a str>,
+    storage: &'s CoreStorage,
+    a: fn(&'s str) -> UniformToken<&'s str>,
+    b: fn(&'s str) -> UniformToken<&'s str>,
+    c: UniformToken<&'s str>,
 
-    output: &mut Vec<UniformToken<&'a str>>,
+    output: &mut Vec<UniformToken<&'s str>>,
 ) {
-    unsafe {
-        match name.prefix {
-            Some(prefix) => {
-                output.push(a(storage.strings.as_str(prefix)));
-                output.push(b(storage.strings.as_str(name.local_part)));
-            }
-            None => {
-                output.push(a(storage.strings.as_str(name.local_part)));
-            }
+    match name.prefix {
+        Some(prefix) => {
+            output.push(a(storage.strings.as_str(prefix)));
+            output.push(b(storage.strings.as_str(name.local_part)));
         }
-
-        output.push(c);
+        None => {
+            output.push(a(storage.strings.as_str(name.local_part)));
+        }
     }
+
+    output.push(c);
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct ElementRef<'a> {
-    storage: &'a Storage,
+struct ElementRef<'s> {
+    storage: &'s Storage,
     index: ElementIndex,
 }
 
-impl<'a> From<(&'a Storage, ElementIndex)> for ElementRef<'a> {
-    fn from(other: (&'a Storage, ElementIndex)) -> Self {
+impl<'s> From<(&'s Storage, ElementIndex)> for ElementRef<'s> {
+    fn from(other: (&'s Storage, ElementIndex)) -> Self {
         let (storage, index) = other;
         ElementRef { storage, index }
     }
 }
 
-impl<'a> ElementRef<'a> {
+impl<'s> ElementRef<'s> {
     fn to_owned(self) -> Element {
         let Self { storage, index } = self;
         let storage = storage.clone();
@@ -925,14 +963,14 @@ impl<'a> ElementRef<'a> {
         f(strings, element)
     }
 
-    fn parent(&self) -> Option<ParentRef<'a>> {
+    fn parent(&self) -> Option<ParentRef<'s>> {
         self.storage.access(self.index, |_, element| {
             let parent = element.parent?;
             Some((self.storage, parent).into())
         })
     }
 
-    fn children(&self) -> Vec<ChildRef<'a>> {
+    fn children(&self) -> Vec<ChildRef<'s>> {
         self.storage.access(self.index, |_, element| {
             // TODO: avoid creating this vector when calling via `Element::children`.
             element
@@ -953,12 +991,11 @@ impl<'a> ElementRef<'a> {
         }
     }
 
-    /// ```rust
-    /// todo!("Document unsafety");
-    ///
-    fn name(&self) -> QName<&'a str> {
-        self.storage.access(self.index, |storage, element| unsafe {
-            element.name.map(|v| storage.strings.as_unbound_str(v))
+    fn name(&self) -> QName<&'s str> {
+        self.storage.access(self.index, |storage, element| {
+            // SAFETY: The name's `UnsafeKey` came from this `UnsafeArena` by construction, and we
+            // tie the result lifetime to `Storage`, which is how long the arena will last.
+            unsafe { element.name.map(|v| storage.strings.as_unbound_str(v)) }
         })
     }
 
@@ -973,7 +1010,7 @@ impl<'a> ElementRef<'a> {
         })
     }
 
-    fn set_attribute<Q, S>(&self, name: Q, value: &str) -> AttributeRef<'a>
+    fn set_attribute<Q, S>(&self, name: Q, value: &str) -> AttributeRef<'s>
     where
         Q: Into<QName<S>>,
         S: AsRef<str>,
@@ -985,7 +1022,7 @@ impl<'a> ElementRef<'a> {
         (self.storage, index).into()
     }
 
-    fn attributes(&self) -> Vec<AttributeRef<'a>> {
+    fn attributes(&self) -> Vec<AttributeRef<'s>> {
         self.storage.access(self.index, |_, element| {
             element
                 .attributes
@@ -995,10 +1032,7 @@ impl<'a> ElementRef<'a> {
         })
     }
 
-    /// ```rust
-    /// todo!("Document unsafety");
-    ///
-    fn attribute_value<Q, S>(&self, attribute_name: Q) -> Option<&'a str>
+    fn attribute_value<Q, S>(&self, attribute_name: Q) -> Option<&'s str>
     where
         Q: Into<QName<S>>,
         S: AsRef<str>,
@@ -1009,10 +1043,14 @@ impl<'a> ElementRef<'a> {
             element.attributes.iter().find_map(|&attr| {
                 let AttributeStorage { name, value, .. } = storage[attr];
 
-                let this_name = unsafe { name.map(|v| storage.strings.as_str(v)) };
+                // SAFETY: The name and value's `UnsafeKey`s came from this `UnsafeArena` by
+                // construction, and we tie the result lifetime to `Storage`, which is how long the
+                // arena will last.
+                unsafe {
+                    let this_name = name.map(|v| storage.strings.as_str(v));
 
-                (attribute_name == this_name)
-                    .then(|| unsafe { storage.strings.as_unbound_str(value) })
+                    (attribute_name == this_name).then(|| storage.strings.as_unbound_str(value))
+                }
             })
         })
     }
@@ -1060,41 +1098,38 @@ impl Element {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct AttributeRef<'a> {
-    storage: &'a Storage,
+struct AttributeRef<'s> {
+    storage: &'s Storage,
     index: AttributeIndex,
 }
 
-impl<'a> From<(&'a Storage, AttributeIndex)> for AttributeRef<'a> {
-    fn from(other: (&'a Storage, AttributeIndex)) -> Self {
+impl<'s> From<(&'s Storage, AttributeIndex)> for AttributeRef<'s> {
+    fn from(other: (&'s Storage, AttributeIndex)) -> Self {
         let (storage, index) = other;
         AttributeRef { storage, index }
     }
 }
 
-impl<'a> AttributeRef<'a> {
-    /// ```rust
-    /// todo!("Document unsafety");
-    ///
-    fn name(&self) -> QName<&'a str> {
+impl<'s> AttributeRef<'s> {
+    fn name(&self) -> QName<&'s str> {
         self.storage.access(self.index, |storage, attribute| {
-            attribute
-                .name
-                .map(|v| unsafe { storage.strings.as_unbound_str(v) })
+            attribute.name.map(|v| {
+                // SAFETY: The name's `UnsafeKey` came from this `UnsafeArena` by construction, and
+                // we tie the result lifetime to `Storage`, which is how long the arena will last.
+                unsafe { storage.strings.as_unbound_str(v) }
+            })
         })
     }
 
-    /// ```rust
-    /// todo!("Document unsafety");
-    ///
-    fn value(&self) -> &'a str {
-        self.storage
-            .access(self.index, |storage, attribute| unsafe {
-                storage.strings.as_unbound_str(attribute.value)
-            })
+    fn value(&self) -> &'s str {
+        self.storage.access(self.index, |storage, attribute| {
+            // SAFETY: The value's `UnsafeKey` came from this `UnsafeArena` by construction, and we
+            // tie the result lifetime to `Storage`, which is how long the arena will last.
+            unsafe { storage.strings.as_unbound_str(attribute.value) }
+        })
     }
 
-    fn parent(&self) -> Option<ElementRef<'a>> {
+    fn parent(&self) -> Option<ElementRef<'s>> {
         self.storage.access(self.index, |_, attribute| {
             attribute.parent.map(|e| (self.storage, e).into())
         })
@@ -1102,24 +1137,24 @@ impl<'a> AttributeRef<'a> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct TextRef<'a> {
-    storage: &'a Storage,
+struct TextRef<'s> {
+    storage: &'s Storage,
     index: TextIndex,
 }
 
-impl<'a> From<(&'a Storage, TextIndex)> for TextRef<'a> {
-    fn from(other: (&'a Storage, TextIndex)) -> Self {
+impl<'s> From<(&'s Storage, TextIndex)> for TextRef<'s> {
+    fn from(other: (&'s Storage, TextIndex)) -> Self {
         let (storage, index) = other;
         TextRef { storage, index }
     }
 }
 
-impl<'a> TextRef<'a> {
+impl<'s> TextRef<'s> {
     fn value(&self) -> impl Deref<Target = str> {
         self.storage.ref_str(|the_ref| &the_ref[self.index].value)
     }
 
-    fn parent(&self) -> Option<ElementRef<'a>> {
+    fn parent(&self) -> Option<ElementRef<'s>> {
         self.storage.access(self.index, |_, text| {
             text.parent.map(|text| (self.storage, text).into())
         })
@@ -1127,24 +1162,24 @@ impl<'a> TextRef<'a> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct CommentRef<'a> {
-    storage: &'a Storage,
+struct CommentRef<'s> {
+    storage: &'s Storage,
     index: CommentIndex,
 }
 
-impl<'a> From<(&'a Storage, CommentIndex)> for CommentRef<'a> {
-    fn from(other: (&'a Storage, CommentIndex)) -> Self {
+impl<'s> From<(&'s Storage, CommentIndex)> for CommentRef<'s> {
+    fn from(other: (&'s Storage, CommentIndex)) -> Self {
         let (storage, index) = other;
         CommentRef { storage, index }
     }
 }
 
-impl<'a> CommentRef<'a> {
+impl<'s> CommentRef<'s> {
     fn value(&self) -> impl Deref<Target = str> {
         self.storage.ref_str(|the_ref| &the_ref[self.index].value)
     }
 
-    fn parent(&self) -> Option<ParentRef<'a>> {
+    fn parent(&self) -> Option<ParentRef<'s>> {
         self.storage.access(self.index, |_, comment| {
             comment.parent.map(|index| (self.storage, index).into())
         })
@@ -1153,16 +1188,16 @@ impl<'a> CommentRef<'a> {
 
 macro_rules! ref_enum {
     (#[index = $indextype:ident]
-     enum $name:ident<'a> {
-         $($vname:ident($vtype:ident<'a>),)*
+     enum $name:ident<'s> {
+         $($vname:ident($vtype:ident<'s>),)*
      }) => {
         #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-        enum $name<'a> {
-            $($vname($vtype<'a>),)*
+        enum $name<'s> {
+            $($vname($vtype<'s>),)*
         }
 
-        impl<'a> $name<'a> {
-            fn storage(&self) -> &'a Storage {
+        impl<'s> $name<'s> {
+            fn storage(&self) -> &'s Storage {
                 match self {
                     $($name::$vname(v) => v.storage,)*
                 }
@@ -1176,16 +1211,16 @@ macro_rules! ref_enum {
         }
 
         $(
-            impl<'a> From<$vtype<'a>> for $name<'a> {
-                fn from(other: $vtype<'a>) -> Self {
+            impl<'s> From<$vtype<'s>> for $name<'s> {
+                fn from(other: $vtype<'s>) -> Self {
                     $name::$vname(other)
                 }
             }
 
-            impl<'a> TryFrom<$name<'a>> for $vtype<'a> {
-                type Error = InvalidType<$name<'a>>;
+            impl<'s> TryFrom<$name<'s>> for $vtype<'s> {
+                type Error = InvalidType<$name<'s>>;
 
-                fn try_from(other: $name<'a>) -> Result<Self, Self::Error> {
+                fn try_from(other: $name<'s>) -> Result<Self, Self::Error> {
                     match other {
                         $name::$vname(i) => Ok(i),
                         #[allow(unreachable_patterns)]
@@ -1194,21 +1229,21 @@ macro_rules! ref_enum {
                 }
             }
 
-            impl<'a> PartialEq<$vtype<'a>> for $name<'a> {
-                fn eq(&self, other: &$vtype<'a>) -> bool {
+            impl<'s> PartialEq<$vtype<'s>> for $name<'s> {
+                fn eq(&self, other: &$vtype<'s>) -> bool {
                     matches!(self, $name::$vname(v) if v == other)
                 }
             }
 
-            impl<'a> PartialEq<$name<'a>> for $vtype<'a> {
-                fn eq(&self, other: &$name<'a>) -> bool {
+            impl<'s> PartialEq<$name<'s>> for $vtype<'s> {
+                fn eq(&self, other: &$name<'s>) -> bool {
                     other == self
                 }
             }
         )*
 
-        impl<'a> From<(&'a Storage, $indextype)> for $name<'a> {
-            fn from(other: (&'a Storage, $indextype)) -> Self {
+        impl<'s> From<(&'s Storage, $indextype)> for $name<'s> {
+            fn from(other: (&'s Storage, $indextype)) -> Self {
                 let (storage, index) = other;
                 match index {
                     $($indextype::$vname(index) => $name::$vname((storage, index).into()),)*
@@ -1220,26 +1255,26 @@ macro_rules! ref_enum {
 
 ref_enum! {
     #[index = ParentIndex]
-    enum ParentRef<'a> {
-        Document(DocumentRef<'a>),
-        Element(ElementRef<'a>),
+    enum ParentRef<'s> {
+        Document(DocumentRef<'s>),
+        Element(ElementRef<'s>),
     }
 }
 
 ref_enum! {
     #[index = ChildIndex]
-    enum ChildRef<'a> {
-        Element(ElementRef<'a>),
-        Text(TextRef<'a>),
-        Comment(CommentRef<'a>),
+    enum ChildRef<'s> {
+        Element(ElementRef<'s>),
+        Text(TextRef<'s>),
+        Comment(CommentRef<'s>),
     }
 }
 
 ref_enum! {
     #[index = DocumentChildIndex]
-    enum DocumentChildRef<'a> {
-        Element(ElementRef<'a>),
-        Comment(CommentRef<'a>),
+    enum DocumentChildRef<'s> {
+        Element(ElementRef<'s>),
+        Comment(CommentRef<'s>),
     }
 }
 
