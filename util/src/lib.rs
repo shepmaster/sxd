@@ -1,7 +1,7 @@
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct QName<T> {
-    prefix: Option<T>,
-    local_part: T,
+    pub prefix: Option<T>,
+    pub local_part: T,
 }
 
 impl<T> QName<T> {
