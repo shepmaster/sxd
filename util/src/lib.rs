@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct QName<T> {
     pub prefix: Option<T>,
@@ -9,6 +11,16 @@ impl<T> QName<T> {
         QName {
             prefix: self.prefix.map(&mut f),
             local_part: f(self.local_part),
+        }
+    }
+
+    pub fn as_deref(&self) -> QName<&T::Target>
+    where
+        T: Deref,
+    {
+        QName {
+            prefix: self.prefix.as_deref(),
+            local_part: &*self.local_part,
         }
     }
 }
