@@ -208,7 +208,7 @@ fn main() -> Result<()> {
     let out_dir: PathBuf = env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?.into();
     let dest_path = out_dir.join("generated_token.rs");
 
-    let mut f = File::create(&dest_path)?;
+    let mut f = File::create(dest_path)?;
     {
         let mut f = BufWriter::new(&mut f);
 

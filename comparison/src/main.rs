@@ -3,7 +3,7 @@ use std::{env, fs};
 fn main() {
     let mode = env::args().nth(1).expect("Mode missing");
     let filename = env::args().nth(2).expect("Filename missing");
-    let data = fs::read(&filename).expect("Could not read data from file");
+    let data = fs::read(filename).expect("Could not read data from file");
 
     match &*mode {
         "fail" => {

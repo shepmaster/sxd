@@ -622,7 +622,7 @@ mod test {
 
     macro_rules! assert_ok {
         ($e:expr) => {
-            assert!(matches!($e, Ok(_)), "Expected Ok(_), but got {:?}", $e,)
+            assert!($e.is_ok(), "Expected Ok(_), but got {:?}", $e,)
         };
     }
 

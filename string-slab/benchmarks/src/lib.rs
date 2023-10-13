@@ -72,7 +72,7 @@ pub mod alloc {
                     .expect("Mutex Poisoned")
                     .0
                     .entry(Trace::new())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(layout.size());
             }
 
