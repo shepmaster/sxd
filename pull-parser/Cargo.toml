@@ -9,7 +9,7 @@ edition = "2021"
 [dependencies]
 token = { package = "sxd-token", path = "../token" }
 
-snafu = "0.7.0"
+snafu.workspace = true
 easy-ext = "1.0.0"
 memchr = "2.3.4"
 paste = "1.0.5"
