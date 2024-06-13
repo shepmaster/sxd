@@ -1554,7 +1554,6 @@ pub enum Error {
         "The {length} bytes of input data, starting at byte {location}, are not allowed in XML"
     ))]
     InvalidChar {
-        #[snafu(implicit(false))]
         location: usize,
         length: usize,
     },
@@ -1563,7 +1562,6 @@ pub enum Error {
         "The {length} bytes of input data, starting at byte {location}, was not UTF-8"
     ))]
     InputNotUtf8 {
-        #[snafu(implicit(false))]
         location: usize,
         length: usize,
     },
@@ -1571,13 +1569,11 @@ pub enum Error {
     #[snafu(display("Expected the token {token:?} at byte {location}, but it was missing"))]
     RequiredTokenMissing {
         token: RequiredToken,
-        #[snafu(implicit(false))]
         location: usize,
     },
 
     #[snafu(display("Required space but it was missing"))]
     RequiredSpaceMissing {
-        #[snafu(implicit(false))]
         location: usize,
     },
 
@@ -1585,19 +1581,16 @@ pub enum Error {
         "Expected either a single or double quote around the attribute value at byte {location}"
     ))]
     ExpectedSingleOrDoubleQuote {
-        #[snafu(implicit(false))]
         location: usize,
     },
 
     #[snafu(display("An invalid character is inside an attribute at byte {location}"))]
     InvalidCharacterInAttribute {
-        #[snafu(implicit(false))]
         location: usize,
     },
 
     #[snafu(display("A double hyphen is inside a comment at byte {location}"))]
     DoubleHyphenInComment {
-        #[snafu(implicit(false))]
         location: usize,
     },
 
@@ -1606,7 +1599,6 @@ pub enum Error {
 
     #[snafu(display("The input data is not valid XML starting at byte {location}"))]
     InvalidXml {
-        #[snafu(implicit(false))]
         location: usize,
     },
 }

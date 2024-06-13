@@ -24,6 +24,9 @@ members = [
     "validation",
 ]
 
+[workspace.dependencies]
+snafu = "0.8.0"
+
 [dependencies]
 token = { package = "sxd-token", path = "token" }
 pull-parser = { package = "sxd-pull-parser", path = "pull-parser" }

@@ -246,7 +246,15 @@ fn generate_token_kind() -> proc_macro2::TokenStream {
 fn generate_token() -> proc_macro2::TokenStream {
     let variants = TOKEN_DEFS.iter().map(|&d| {
         let TokenDef { doc, has_data, .. } = d;
+
         let name = d.name_ident();
+
+        let doc = if doc.is_empty() {
+            quote! {}
+        } else {
+            quote! { #[doc = #doc] }
+        };
+
         let field = if has_data {
             quote! { (K::#name) }
         } else {
@@ -254,7 +262,7 @@ fn generate_token() -> proc_macro2::TokenStream {
         };
 
         quote! {
-            #[doc = #doc]
+            #doc
             #name #field
         }
     });
