@@ -2,8 +2,7 @@ use benchmarks::{
     alloc::TrackingAllocator, env_or, WITHOUT_DUPLICATES_STRING, WITH_DUPLICATES_STRING,
 };
 use hashbrown::HashSet;
-use once_cell::sync::Lazy;
-use std::convert::TryFrom;
+use std::{convert::TryFrom, sync::LazyLock};
 use sxd_string_slab::UnsafeArena;
 
 #[global_allocator]
@@ -11,8 +10,8 @@ static A: TrackingAllocator = TrackingAllocator;
 
 fn main() {
     let show_map = env_or("SHOW_MAP", false);
-    Lazy::force(&WITHOUT_DUPLICATES_STRING);
-    Lazy::force(&WITH_DUPLICATES_STRING);
+    LazyLock::force(&WITHOUT_DUPLICATES_STRING);
+    LazyLock::force(&WITH_DUPLICATES_STRING);
 
     let total_length: usize = WITH_DUPLICATES_STRING.lines().map(str::len).sum();
     let total_length_f64 = f64::from(u32::try_from(total_length).unwrap());

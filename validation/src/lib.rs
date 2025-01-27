@@ -1,11 +1,10 @@
 #![deny(rust_2018_idioms)]
 
 use hashbrown::HashSet;
-use once_cell::sync::Lazy;
 use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
-use std::io::Read;
+use std::{io::Read, sync::LazyLock};
 use string_slab::{CheckedArena, CheckedKey};
 use token::{Token, TokenKind};
 use util::{QName, QNameBuilder};
@@ -136,8 +135,8 @@ impl ValidatorCore {
             }
 
             DeclarationEncoding(v) => {
-                static VALID_ENCODING_STRING: Lazy<Regex> =
-                    Lazy::new(|| Regex::new(r#"\A[A-Za-z]([A-Za-z0-9._]|'-')*\z"#).unwrap());
+                static VALID_ENCODING_STRING: LazyLock<Regex> =
+                    LazyLock::new(|| Regex::new(r#"\A[A-Za-z]([A-Za-z0-9._]|'-')*\z"#).unwrap());
 
                 let v = v.as_fused_str();
 
@@ -264,9 +263,8 @@ impl ValidatorCore {
 
             AttributeValueEnd => {
                 let is_xmlns = is_xmlns.take();
-                let is_valid = is_xmlns.map_or(true, |v| {
-                    v == XmlNsKind::Default || *attribute_value_had_content
-                });
+                let is_valid = is_xmlns
+                    .is_none_or(|v| v == XmlNsKind::Default || *attribute_value_had_content);
                 ensure!(is_valid, NamespaceEmptySnafu);
             }
 
