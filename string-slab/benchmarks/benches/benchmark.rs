@@ -2,13 +2,12 @@ use benchmarks::{generate_with_duplicates, WITHOUT_DUPLICATES, WITH_DUPLICATES};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use hashbrown::HashSet;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
-use std::{convert::TryInto, iter};
+use std::{convert::TryInto, iter, sync::LazyLock};
 use sxd_string_slab::UnsafeArena;
 
 fn without_duplicates(c: &mut Criterion) {
-    Lazy::force(&WITHOUT_DUPLICATES);
-    Lazy::force(&WITH_DUPLICATES);
+    LazyLock::force(&WITHOUT_DUPLICATES);
+    LazyLock::force(&WITH_DUPLICATES);
 
     let mut group = c.benchmark_group("without-duplicates");
     group.throughput(Throughput::Elements(
@@ -37,8 +36,8 @@ fn without_duplicates(c: &mut Criterion) {
 }
 
 fn with_duplicates(c: &mut Criterion) {
-    Lazy::force(&WITHOUT_DUPLICATES);
-    Lazy::force(&WITH_DUPLICATES);
+    LazyLock::force(&WITHOUT_DUPLICATES);
+    LazyLock::force(&WITH_DUPLICATES);
 
     let mut group = c.benchmark_group("with-duplicates");
     group.throughput(Throughput::Elements(
@@ -67,8 +66,8 @@ fn with_duplicates(c: &mut Criterion) {
 }
 
 fn slab_vs_string_length(c: &mut Criterion) {
-    Lazy::force(&WITHOUT_DUPLICATES);
-    Lazy::force(&WITH_DUPLICATES);
+    LazyLock::force(&WITHOUT_DUPLICATES);
+    LazyLock::force(&WITH_DUPLICATES);
 
     let double_in_range = |l: usize, u: usize| {
         iter::successors(Some(l), |v| v.checked_mul(2)).take_while(move |&v| v <= u)

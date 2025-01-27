@@ -429,9 +429,9 @@ pub struct CheckedKey(*const RefCell<UnsafeArena>, UnsafeKey);
 #[cfg(test)]
 mod test {
     use hashbrown::HashMap;
-    use once_cell::sync::Lazy;
     use proptest::prelude::*;
     use rand::seq::SliceRandom;
+    use std::sync::LazyLock;
 
     use super::*;
 
@@ -495,7 +495,7 @@ mod test {
         })
     }
 
-    static CONFIG: Lazy<ProptestConfig> = Lazy::new(|| {
+    static CONFIG: LazyLock<ProptestConfig> = LazyLock::new(|| {
         let mut cfg = ProptestConfig::default();
 
         if cfg!(miri) {

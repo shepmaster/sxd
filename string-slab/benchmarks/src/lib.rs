@@ -2,21 +2,19 @@
 
 use hashbrown::HashSet;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use rand::{distributions::Alphanumeric, rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
-use std::{env, iter, str::FromStr};
+use std::{env, iter, str::FromStr, sync::LazyLock};
 
 pub mod alloc {
     use backtrace::Backtrace;
     use hashbrown::HashMap;
-    use once_cell::sync::Lazy;
     use std::{
         alloc::{GlobalAlloc, Layout, System},
         hash::{Hash, Hasher},
         mem,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
-            Mutex,
+            LazyLock, Mutex,
         },
     };
 
@@ -25,7 +23,7 @@ pub mod alloc {
     static RECURSIVE: AtomicBool = AtomicBool::new(false);
     static MEMORY_IN_USE: AtomicUsize = AtomicUsize::new(0);
     static N_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-    static ALLOCATION_MAP: Lazy<Mutex<AllocMap>> = Lazy::new(Default::default);
+    static ALLOCATION_MAP: LazyLock<Mutex<AllocMap>> = LazyLock::new(Default::default);
 
     #[derive(Debug, Default)]
     pub struct AllocMap(HashMap<Trace, Vec<usize>>);
@@ -149,7 +147,7 @@ where
 }
 
 pub fn rng() -> StdRng {
-    static SEED: Lazy<u64> = Lazy::new(|| {
+    static SEED: LazyLock<u64> = LazyLock::new(|| {
         let seed = env_or_else("BENCHMARK_SEED", || rand::thread_rng().gen());
         eprintln!("Using random seed {} (can be set via BENCHMARK_SEED)", seed);
         seed
@@ -190,17 +188,18 @@ pub fn generate_with_duplicates(n_items: usize, max_str_len: usize) -> Vec<Strin
     no_dupes
 }
 
-pub static WITHOUT_DUPLICATES: Lazy<HashSet<String>> = Lazy::new(|| {
+pub static WITHOUT_DUPLICATES: LazyLock<HashSet<String>> = LazyLock::new(|| {
     let n_items = env_or("N_WITHOUT_DUPLICATES", 10_000);
     generate_without_duplicates(n_items, 2048)
 });
 
-pub static WITHOUT_DUPLICATES_STRING: Lazy<String> =
-    Lazy::new(|| WITHOUT_DUPLICATES.iter().join("\n"));
+pub static WITHOUT_DUPLICATES_STRING: LazyLock<String> =
+    LazyLock::new(|| WITHOUT_DUPLICATES.iter().join("\n"));
 
-pub static WITH_DUPLICATES: Lazy<Vec<String>> = Lazy::new(|| {
+pub static WITH_DUPLICATES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let n_items = env_or("N_WITH_DUPLICATES", 10_000);
     generate_with_duplicates(n_items, 2048)
 });
 
-pub static WITH_DUPLICATES_STRING: Lazy<String> = Lazy::new(|| WITH_DUPLICATES.iter().join("\n"));
+pub static WITH_DUPLICATES_STRING: LazyLock<String> =
+    LazyLock::new(|| WITH_DUPLICATES.iter().join("\n"));

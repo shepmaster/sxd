@@ -13,7 +13,6 @@ backtrace = "0.3.56"
 criterion = "0.5.1"
 hashbrown = { version = "0.14.1", default-features = false, features = ["ahash", "inline-more"] }
 itertools = "0.11.0"
-once_cell = "1.5.2"
 rand = "0.8.4"
 
 [[bench]]
