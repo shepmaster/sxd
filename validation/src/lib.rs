@@ -263,9 +263,8 @@ impl ValidatorCore {
 
             AttributeValueEnd => {
                 let is_xmlns = is_xmlns.take();
-                let is_valid = is_xmlns.map_or(true, |v| {
-                    v == XmlNsKind::Default || *attribute_value_had_content
-                });
+                let is_valid = is_xmlns
+                    .is_none_or(|v| v == XmlNsKind::Default || *attribute_value_had_content);
                 ensure!(is_valid, NamespaceEmptySnafu);
             }
 

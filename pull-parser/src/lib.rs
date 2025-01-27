@@ -1958,7 +1958,7 @@ mod test {
         fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error>;
     }
 
-    impl<'a> TryIntoTokens for &'a str {
+    impl TryIntoTokens for &str {
         type Error = Error;
 
         #[track_caller]
@@ -1967,7 +1967,7 @@ mod test {
         }
     }
 
-    impl<'a> TryIntoTokens for &'a [u8] {
+    impl TryIntoTokens for &[u8] {
         type Error = Error;
 
         #[track_caller]
@@ -1986,7 +1986,7 @@ mod test {
         WithCapacity(v, StringRing::MINIMUM_CAPACITY)
     }
 
-    impl<'a> TryIntoTokens for WithCapacity<&'a str> {
+    impl TryIntoTokens for WithCapacity<&str> {
         type Error = Error;
 
         #[track_caller]
@@ -1995,7 +1995,7 @@ mod test {
         }
     }
 
-    impl<'a> TryIntoTokens for WithCapacity<&'a [u8]> {
+    impl TryIntoTokens for WithCapacity<&[u8]> {
         type Error = Error;
 
         #[track_caller]
