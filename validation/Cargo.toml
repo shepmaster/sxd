@@ -12,7 +12,7 @@ string-slab = { package = "sxd-string-slab", path = "../string-slab" }
 token = { package = "sxd-token", path = "../token" }
 util = { package = "sxd-util", path = "../util" }
 
-hashbrown = { version = "0.14.1", default-features = false, features = ["ahash", "inline-more"] }
+hashbrown.workspace = true
 once_cell = { version = "1.7.0", default-features = false, features = ["std"] }
 regex = { version = "1.4.3", default-features = false, features = ["std"] }
 snafu.workspace = true

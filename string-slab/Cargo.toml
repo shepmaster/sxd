@@ -13,7 +13,7 @@ documentation = "https://docs.rs/sxd-string-slab"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-hashbrown = { version = "0.14.1", default-features = false, features = ["ahash", "inline-more"] }
+hashbrown.workspace = true
 
 [dev-dependencies]
 proptest = "1.0"

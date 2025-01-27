@@ -25,6 +25,7 @@ members = [
 ]
 
 [workspace.dependencies]
+hashbrown = { version = "0.15.2", default-features = false, features = ["default-hasher", "inline-more"] }
 snafu = "0.8.0"
 
 [dependencies]
