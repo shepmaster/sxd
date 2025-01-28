@@ -1,13 +1,14 @@
 #![deny(rust_2018_idioms)]
 
 use hashbrown::HashSet;
-use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser, XmlCharExt, XmlStrExt};
+use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{io::Read, sync::LazyLock};
 use string_slab::{CheckedArena, CheckedKey};
 use token::{Token, TokenKind};
 use util::{QName, QNameBuilder};
+use xml_str::{CharExt, StrExt};
 
 trait Exchange {
     fn exchange(&self, qname: QName<CheckedKey>) -> QName<&str>;
@@ -447,7 +448,7 @@ fn reference_value(value: &str, radix: u32) -> Result<char, ReferenceValueError>
     let value = u32::from_str_radix(value, radix).context(InvalidValueSnafu { value })?;
     let value = char::from_u32(value).context(InvalidUnicodeCharacterSnafu { value })?;
     ensure!(
-        value.is_allowed_xml_char(),
+        value.is_xml_char(),
         DisallowedUnicodeCharacterSnafu { value }
     );
     Ok(value)

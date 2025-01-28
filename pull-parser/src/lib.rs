@@ -1,185 +1,149 @@
 #![deny(rust_2018_idioms)]
 
 use easy_ext::ext;
+use memchr::memmem;
 use snafu::{ensure, Snafu};
-use std::{io::Read, marker::PhantomData, mem, str};
+use std::{
+    fmt,
+    io::{self, Read},
+    marker::PhantomData,
+    mem, ops, str,
+};
 use token::{IsComplete, Streaming, Token, TokenKind, UniformToken};
+use xml_str::{SliceExt, U8Ext};
 
 #[macro_use]
 mod macros;
 
-#[derive(Debug)]
-struct StringRing {
-    buffer: Vec<u8>,
+struct MaybeUtf8<'a>(&'a [u8]);
 
-    n_offset_bytes: usize,
-    n_utf8_bytes: usize,
-    n_dangling_bytes: usize,
+impl<'a> fmt::Debug for MaybeUtf8<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut chunks = self.0.utf8_chunks();
 
-    n_retired_bytes: usize,
+        let one_chunk = |f: &mut fmt::Formatter<'_>, c: str::Utf8Chunk<'_>| {
+            c.valid().fmt(f)?;
+            write!(f, ", ")?;
 
-    source_exhausted: bool,
+            let mut invalid = c.invalid().iter();
+            if let Some(i) = invalid.next() {
+                write!(f, "0x{i:02x}")?;
+
+                for i in invalid {
+                    write!(f, ", ")?;
+                    write!(f, "0x{i:02x}")?;
+                }
+            }
+
+            fmt::Result::Ok(())
+        };
+
+        if let Some(c) = chunks.next() {
+            one_chunk(f, c)?;
+            for c in chunks {
+                write!(f, ", ")?;
+                one_chunk(f, c)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
-impl StringRing {
-    // The longest single token should be `standalone`, then round up
-    // a bit.
-    const MINIMUM_CAPACITY: usize = 16;
-    const DEFAULT_CAPACITY: usize = 1024;
+// TODO
+/// Callers should always have this many bytes or else may never progress.
+// The longest single token should be `standalone`, then round up a bit.
+#[cfg(test)]
+const MINIMUM_CAPACITY: usize = 16;
+const DEFAULT_CAPACITY: usize = 1024;
 
-    fn with_capacity(capacity: usize) -> Self {
-        assert!(
-            capacity >= Self::MINIMUM_CAPACITY,
-            "The capacity must be large enough to match minimum token lengths",
-        );
+struct BufAdvance<'a> {
+    buffer: &'a [u8],
+    advance: usize,
+    checkpoint: usize,
+    exhausted: bool,
+}
 
+impl fmt::Debug for BufAdvance<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufAdvance")
+            .field("buffer", &MaybeUtf8(self.buffer))
+            .field("advance", &self.advance)
+            .field("checkpoint", &self.checkpoint)
+            .field("exhausted", &self.exhausted)
+            .finish()
+    }
+}
+
+impl<'a> BufAdvance<'a> {
+    fn new(buffer: &'a [u8], exhausted: bool) -> Self {
         Self {
-            buffer: vec![0; capacity],
-
-            n_offset_bytes: 0,
-            n_utf8_bytes: 0,
-            n_dangling_bytes: 0,
-
-            n_retired_bytes: 0,
-
-            source_exhausted: false,
+            buffer,
+            advance: 0,
+            checkpoint: 0,
+            exhausted,
         }
     }
 
-    fn as_str(&self) -> &str {
-        let bytes = &self.buffer[self.n_offset_bytes..][..self.n_utf8_bytes];
-
-        // SAFETY: The range of bytes that are valid UTF-8 is checked
-        // when `extend`ing the buffer and when advancing it. Checking
-        // it again here leads to a massive (~1000X) slowdown.
-        unsafe { str::from_utf8_unchecked(bytes) }
+    fn checkpoint(&mut self) {
+        self.checkpoint = self.advance;
     }
 
     /// Tries to return a string with the given byte length, but if
     /// the input is exhausted, the returned string may be shorter.
-    fn weak_min_str(&mut self, len: usize) -> Result<&str> {
+    fn weak_min_str(&self, len: usize) -> Result<&'a [u8]> {
         ensure!(
-            self.n_utf8_bytes >= len || self.source_exhausted,
-            NeedsMoreInputSnafu
-        );
-        Ok(self.as_str())
-    }
-
-    fn min_str(&mut self, len: usize) -> Result<&str> {
-        if self.n_utf8_bytes < len {
-            if self.source_exhausted {
-                return InputExhaustedSnafu.fail();
-            } else {
-                return NeedsMoreInputSnafu.fail();
+            self.buffer.len() >= len || self.exhausted,
+            NeedsMoreInputSnafu {
+                advance: self.checkpoint
             }
-        }
+        );
 
-        Ok(self.as_str())
+        Ok(self.buffer)
     }
 
-    fn some_str(&mut self) -> Result<&str> {
-        self.min_str(1)
+    fn min_bytes(&self, len: usize) -> Result<&'a [u8]> {
+        ensure!(
+            self.buffer.enough_to_parse() && self.buffer.len() >= len,
+            NeedsMoreInputSnafu {
+                advance: self.checkpoint,
+            }
+        );
+
+        Ok(self.buffer)
+    }
+
+    fn some_str(&self) -> Result<&'a [u8]> {
+        ensure!(
+            self.buffer.enough_to_parse(),
+            NeedsMoreInputSnafu {
+                advance: self.checkpoint,
+            }
+        );
+
+        Ok(self.buffer)
     }
 
     fn absolute_location(&self) -> usize {
-        self.n_retired_bytes + self.n_offset_bytes
+        self.advance
     }
 
-    fn refill_using<E>(
-        &mut self,
-        f: impl FnOnce(&mut [u8]) -> Result<usize, E>,
-    ) -> Result<Result<usize, E>> {
-        let mut buffer =
-            &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][self.n_dangling_bytes..];
-
-        if buffer.is_empty() {
-            let s = self.n_offset_bytes;
-            let e = s + self.n_utf8_bytes + self.n_dangling_bytes;
-            self.buffer.copy_within(s..e, 0);
-            self.n_offset_bytes = 0;
-            self.n_retired_bytes += s;
-
-            buffer = &mut self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..]
-                [self.n_dangling_bytes..];
-        }
-        assert!(
-            !buffer.is_empty(),
-            "No room left to store data in buffer; buffer too small",
-        );
-
-        let n_new_bytes = match f(buffer) {
-            Ok(n) => n,
-            Err(e) => return Ok(Err(e)),
-        };
-
-        if n_new_bytes == 0 {
-            self.source_exhausted = true;
-        }
-
-        self.n_dangling_bytes += n_new_bytes;
-
-        let dangling_bytes =
-            &self.buffer[self.n_offset_bytes..][self.n_utf8_bytes..][..self.n_dangling_bytes];
-
-        // SAFETY: This helps uphold the safety invariants in `as_str`
-        let n_new_utf8_bytes = match str::from_utf8(dangling_bytes) {
-            Ok(s) => s.len(),
-            Err(e) => match e.error_len() {
-                Some(length) => {
-                    return InputNotUtf8Snafu {
-                        location: self.absolute_location() + self.n_utf8_bytes + e.valid_up_to(),
-                        length,
-                    }
-                    .fail()
-                }
-                None => e.valid_up_to(),
-            },
-        };
-
-        // SAFETY: We just calculated how many bytes of the dangling
-        // bytes are valid UTF-8, so we don't need to do it again.
-        unsafe {
-            let s = str::from_utf8_unchecked(&dangling_bytes[..n_new_utf8_bytes]);
-            for (idx, c) in s.char_indices() {
-                ensure!(
-                    c.is_allowed_xml_char(),
-                    InvalidCharSnafu {
-                        location: self.n_retired_bytes
-                            + self.n_offset_bytes
-                            + self.n_utf8_bytes
-                            + idx,
-                        length: c.len_utf8()
-                    }
-                )
-            }
-        }
-
-        self.n_dangling_bytes -= n_new_utf8_bytes;
-        self.n_utf8_bytes += n_new_utf8_bytes;
-
-        Ok(Ok(n_new_bytes))
+    fn complete(&self) -> bool {
+        self.buffer.is_empty() && self.exhausted
     }
 
-    fn complete(&mut self) -> bool {
-        self.n_utf8_bytes == 0 && self.n_dangling_bytes == 0 && self.source_exhausted
-    }
-
-    fn starts_with(&mut self, needle: &str) -> Result<bool> {
+    fn starts_with(&self, needle: &[u8]) -> Result<bool> {
         let s = abandon!(self.weak_min_str(needle.len()));
         Ok(s.starts_with(needle))
     }
 
     #[inline(always)]
     fn advance(&mut self, n_bytes: usize) {
-        // SAFETY: These help uphold the safety invariants in `as_str`
-        assert!(n_bytes <= self.n_utf8_bytes);
-        assert!(self.as_str().is_char_boundary(n_bytes));
-
-        self.n_offset_bytes += n_bytes;
-        self.n_utf8_bytes -= n_bytes;
+        self.advance += n_bytes;
+        self.buffer = &self.buffer[n_bytes..];
     }
 
-    fn consume(&mut self, s: impl AsRef<str>) -> Result<MustUse<bool>> {
+    fn consume(&mut self, s: impl AsRef<[u8]>) -> Result<MustUse<bool>> {
         let s = s.as_ref();
 
         if abandon!(self.starts_with(s)) {
@@ -193,8 +157,8 @@ impl StringRing {
     fn consume_xml(&mut self) -> Result<MustUse<bool>> {
         let s = abandon!(self.weak_min_str(4));
 
-        if let Some(x) = s.strip_prefix("xml") {
-            let next = match x.as_bytes().split_first() {
+        if let Some(x) = s.strip_prefix(b"xml") {
+            let next = match x.split_first() {
                 Some((&h, _)) => h,
                 None => return Ok(MustUse(false)),
             };
@@ -211,8 +175,8 @@ impl StringRing {
     }
 
     /// Returns the next byte, if any are still in the valid string buffer
-    fn maybe_peek_byte(&mut self) -> Option<u8> {
-        self.buffer.get(self.n_offset_bytes).copied()
+    fn maybe_peek_byte(&self) -> Option<u8> {
+        self.buffer.first().copied()
     }
 
     /// Peeks at the next byte and returns true if:
@@ -220,14 +184,14 @@ impl StringRing {
     /// - the next byte is '!' or '?', indicating a potential special tag (`<!...`, `<?...`)
     /// - the buffer is empty (no next byte currently available, so we have to check for
     ///   special tags the normal way)
-    fn maybe_special_tag_start_char(&mut self) -> MustUse<bool> {
+    fn maybe_special_tag_start_char(&self) -> MustUse<bool> {
         match self.maybe_peek_byte() {
             Some(b) => MustUse(b == b'!' || b == b'?'),
             None => MustUse(true),
         }
     }
 
-    fn require_or_else(&mut self, s: &str, e: impl FnOnce(usize) -> Error) -> Result<()> {
+    fn require_or_else(&mut self, s: &[u8], e: impl FnOnce(usize) -> Error) -> Result<()> {
         if *abandon!(self.consume(s)) {
             Ok(())
         } else {
@@ -235,7 +199,7 @@ impl StringRing {
         }
     }
 
-    fn require(&mut self, token: &'static str) -> Result<()> {
+    fn require(&mut self, token: &[u8]) -> Result<()> {
         self.require_or_else(token, |location| {
             RequiredTokenMissingSnafu {
                 token: RequiredToken::from_token(token),
@@ -259,9 +223,9 @@ impl StringRing {
     fn attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match memchr::memchr3(b'<', b'&', quote_style.to_ascii_char(), s.as_bytes()) {
-            Some(x) => Ok(Streaming::Complete(x)),
-            None => Ok(Streaming::Partial(s.len())),
+        match memchr::memchr3(b'<', b'&', quote_style.to_ascii_char(), s) {
+            Some(x) => Ok(s[..x].xml_chars().complete_thing()),
+            None => Ok(s.xml_chars().partial_thing()),
         }
     }
 
@@ -270,84 +234,54 @@ impl StringRing {
     fn plain_attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match memchr::memchr(quote_style.to_ascii_char(), s.as_bytes()) {
-            Some(x) => Ok(Streaming::Complete(x)),
-            None => Ok(Streaming::Partial(s.len())),
+        match memchr::memchr(quote_style.to_ascii_char(), s) {
+            Some(x) => Ok(s[..x].xml_chars().complete_thing()),
+            None => Ok(s.xml_chars().partial_thing()),
         }
     }
 
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
-    fn char_data(&mut self) -> Result<Streaming<usize>> {
-        // 3 so we will be able to tell if we start with `]]>`
-        let mut s = abandon!(self.weak_min_str(3)).as_bytes();
-        let mut running_offset = 0;
+    fn char_data(&self) -> Result<Streaming<usize>> {
+        let s = abandon!(self.some_str());
 
-        loop {
-            let inner = memchr::memchr3(b'<', b'&', b']', s);
-
-            match inner {
-                None => break Ok(Streaming::Partial(running_offset + s.len())),
-                Some(inner_offset) => {
-                    let (head, tail) = s.split_at(inner_offset);
-                    if tail.starts_with(b"]") && tail.len() >= 3 {
-                        if tail.starts_with(b"]]>") {
-                            break Ok(Streaming::Complete(running_offset + head.len()));
-                        } else {
-                            running_offset += head.len() + 1; // Skip over the `]`
-                            s = &tail[1..];
-                        }
-                    } else {
-                        break Ok(Streaming::Complete(running_offset + head.len()));
-                    }
-                }
-            }
-        }
-    }
-
-    fn first_char_data(&mut self) -> Result<Option<Streaming<usize>>> {
-        let v = abandon!(self.char_data());
-        if *v.unify() == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(v))
-        }
+        Ok(s.char_data().partial_thing())
     }
 
     /// Anything that's not `]]>`
-    fn cdata(&mut self) -> Result<Streaming<usize>> {
-        let s = abandon!(self.min_str(3));
+    fn cdata(&self) -> Result<Streaming<usize>> {
+        let s = abandon!(self.min_bytes(3));
 
-        match s.find("]]>") {
-            Some(offset) => Ok(Streaming::Complete(offset)),
+        match memmem::find(s, b"]]>") {
+            Some(offset) => Ok(s[..offset].xml_chars().complete_thing()),
             None => {
                 // Once for each `]`
-                let s = s.strip_suffix(']').unwrap_or(s);
-                let s = s.strip_suffix(']').unwrap_or(s);
-                Ok(Streaming::Partial(s.len()))
+                let s = s.strip_suffix(b"]").unwrap_or(s);
+                let s = s.strip_suffix(b"]").unwrap_or(s);
+                Ok(s.xml_chars().partial_thing())
             }
         }
     }
 
-    fn processing_instruction_value(&mut self) -> Result<Streaming<usize>> {
-        let s = abandon!(self.min_str(2));
+    fn processing_instruction_value(&self) -> Result<Streaming<usize>> {
+        let s = abandon!(self.min_bytes(2));
 
-        match s.find("?>") {
-            Some(offset) => Ok(Streaming::Complete(offset)),
+        match memmem::find(s, b"?>") {
+            Some(offset) => Ok(s[..offset].xml_chars().complete_thing()),
             None => {
-                let s = s.strip_suffix('?').unwrap_or(s);
-                Ok(Streaming::Partial(s.len()))
+                let s = s.strip_suffix(b"?").unwrap_or(s);
+                Ok(s.xml_chars().partial_thing())
             }
         }
     }
 
-    fn comment(&mut self) -> Result<Streaming<usize>> {
-        let s = abandon!(self.min_str(2));
+    fn comment(&self) -> Result<Streaming<usize>> {
+        let s = abandon!(self.min_bytes(2));
 
-        match s.find("--") {
-            Some(offset) => Ok(Streaming::Complete(offset)),
+        match memmem::find(s, b"--") {
+            Some(offset) => Ok(s[..offset].xml_chars().complete_thing()),
             None => {
-                let s = s.strip_suffix('-').unwrap_or(s);
-                Ok(Streaming::Partial(s.len()))
+                let s = s.strip_suffix(b"-").unwrap_or(s);
+                Ok(s.xml_chars().partial_thing())
             }
         }
     }
@@ -356,168 +290,65 @@ impl StringRing {
     // use of this should likely occur at the beginning of a state
     // dispatch.
     fn consume_space(&mut self) -> Result<usize> {
-        let s = self.as_str();
+        let (s, r) = self.buffer.xml_space();
 
-        let n_bytes_space = s
-            .as_bytes()
-            .iter()
-            .position(|c| !c.is_xml_space())
-            .unwrap_or(s.len());
+        let all_space = r.is_empty();
 
-        let all_space = n_bytes_space == s.len();
+        self.advance(s.len());
+        ensure!(
+            !all_space,
+            NeedsMoreInputSnafu {
+                advance: self.advance
+            }
+        );
 
-        self.advance(n_bytes_space);
-        ensure!(!all_space, NeedsMoreInputSpaceSnafu { n_bytes_space });
-
-        Ok(n_bytes_space)
+        Ok(s.len())
     }
 
-    fn reference_decimal(&mut self) -> Result<Streaming<usize>> {
-        // SAFETY: only checks ascii characters
-        unsafe { self.while_bytes(u8::is_ascii_digit) }
-    }
-
-    fn reference_hex(&mut self) -> Result<Streaming<usize>> {
-        // SAFETY: only checks ascii characters
-        unsafe { self.while_bytes(u8::is_ascii_hexdigit) }
-    }
-
-    fn ncname(&mut self) -> Result<Streaming<usize>> {
+    fn reference_decimal(&self) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        let mut c = s.char_indices();
-
-        let end_idx = match c
-            .next()
-            .filter(|(_, c)| c.is_ncname_start_char())
-            .map(|(i, c)| i + c.len_utf8())
-        {
-            Some(i) => i,
-            None => return Ok(Streaming::Complete(0)),
-        };
-
-        let end_idx = c
-            .take_while(|(_, c)| c.is_ncname_char())
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(end_idx);
-
-        if end_idx == s.len() {
-            Ok(Streaming::Partial(s.len()))
-        } else {
-            Ok(Streaming::Complete(end_idx))
-        }
+        Ok(s.reference_decimal().partial_thing())
     }
 
-    fn ncname_continuation(&mut self) -> Result<Streaming<usize>> {
-        self.while_char(char::is_ncname_char)
-    }
-
-    #[inline]
-    fn while_char(&mut self, predicate: impl Fn(&char) -> bool) -> Result<Streaming<usize>> {
+    fn reference_hex(&self) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match matching_bytes(s, predicate) {
-            offset if offset == s.len() => Ok(Streaming::Partial(s.len())),
-            offset => Ok(Streaming::Complete(offset)),
-        }
+        Ok(s.reference_hex().partial_thing())
     }
 
-    /// # Safety
-    ///
-    /// The caller has to make sure the remaining string is valid utf8
-    /// (= predicate may only check for ASCII).
-    #[inline]
-    unsafe fn while_bytes(&mut self, predicate: impl Fn(&u8) -> bool) -> Result<Streaming<usize>> {
+    fn ncname(&self) -> Result<Streaming<usize>> {
         let s = abandon!(self.some_str());
 
-        match s.as_bytes().iter().position(|c| !predicate(c)) {
-            None => Ok(Streaming::Partial(s.len())), // all bytes match
-            Some(offset) => Ok(Streaming::Complete(offset)),
-        }
+        Ok(s.nc_name().partial_thing())
     }
-}
 
-#[inline]
-fn matching_bytes(s: &str, predicate: impl Fn(&char) -> bool) -> usize {
-    s.char_indices()
-        .take_while(|(_, c)| predicate(c))
-        .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0)
+    fn ncname_continuation(&self) -> Result<Streaming<usize>> {
+        let s = abandon!(self.some_str());
+
+        Ok(s.nc_name_continuation().partial_thing())
+    }
+
+    fn into_token_context(self) -> TokenContext {
+        TokenContext { pre: self.advance }
+    }
 }
 
 #[ext]
-impl u8 {
-    #[inline]
-    fn is_xml_space(&self) -> bool {
-        matches!(*self, b' ' | 9 | b'\r' | b'\n')
-    }
-}
+impl (&str, &[u8]) {
+    fn partial_thing(self) -> Streaming<usize> {
+        let (value, remainder) = self;
 
-#[ext(XmlCharExt)]
-pub impl char {
-    #[inline]
-    fn is_allowed_xml_char(&self) -> bool {
-        // Sorted by how common each case is which noticeably impacts
-        // performance
-        matches!(
-            self,
-                '\u{20}'..='\u{FF}'
-                | '\u{9}'
-                | '\u{A}'
-                | '\u{D}'
-                | '\u{100}'..='\u{D7FF}'
-                | '\u{E000}'..='\u{FFFD}'
-                | '\u{10000}'..='\u{10FFFF}'
-        )
+        if remainder.enough_to_parse() || value.is_empty() {
+            Streaming::Complete(value.len())
+        } else {
+            Streaming::Partial(value.len())
+        }
     }
 
-    #[inline]
-    fn is_ncname_start_char_ascii(&self) -> bool {
-        matches!(self, 'A'..='Z' | '_' | 'a'..='z')
-    }
-
-    #[inline]
-    fn is_ncname_start_char_non_ascii(&self) -> bool {
-        (matches!(self, '\u{C0}'..='\u{2FF}') && !matches!(self, '\u{D7}' | '\u{F7}'))
-            || matches!(
-                self,
-                '\u{370}'..='\u{37D}'
-                    | '\u{37F}'..='\u{1FFF}'
-                    | '\u{200C}'..='\u{200D}'
-                    | '\u{2070}'..='\u{218F}'
-                    | '\u{2C00}'..='\u{2FEF}'
-                    | '\u{3001}'..='\u{D7FF}'
-                    | '\u{F900}'..='\u{FDCF}'
-                    | '\u{FDF0}'..='\u{FFFD}'
-                    | '\u{10000}'..='\u{EFFFF}'
-            )
-    }
-
-    #[inline]
-    fn is_ncname_start_char(&self) -> bool {
-        self.is_ncname_start_char_ascii() || self.is_ncname_start_char_non_ascii()
-    }
-
-    #[inline]
-    fn is_ncname_non_start_char_ascii(&self) -> bool {
-        matches!(self, '-' | '.' | '0'..='9')
-    }
-
-    #[inline]
-    fn is_ncname_char(&self) -> bool {
-        self.is_ncname_start_char_ascii()
-            || self.is_ncname_non_start_char_ascii()
-            || self.is_ncname_start_char_non_ascii()
-            || matches!(self, '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
-    }
-}
-
-#[ext(XmlStrExt)]
-pub impl str {
-    fn is_xml_space(&self) -> bool {
-        self.as_bytes().iter().all(u8::is_xml_space)
+    fn complete_thing(self) -> Streaming<usize> {
+        let (value, _remainder) = self;
+        Streaming::Complete(value.len())
     }
 }
 
@@ -526,8 +357,9 @@ pub impl str {
 // need to be able to exit our loop, allow the user to refill the
 // buffer, then resume parsing without losing our place. Each unique
 // state provides a resumption point.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 enum State {
+    #[default]
     Initial,
 
     AfterDeclarationOpen,
@@ -538,6 +370,7 @@ enum State {
     AfterDeclarationVersionAttributeEquals,
     AfterDeclarationVersionAttributeEqualsSpace,
     StreamDeclarationVersion(Quote),
+    AfterDeclarationVersionValue(Quote),
     AfterDeclarationVersion,
     AfterDeclarationVersionSpace,
 
@@ -546,6 +379,7 @@ enum State {
     AfterDeclarationEncodingAttributeEquals,
     AfterDeclarationEncodingAttributeEqualsSpace,
     StreamDeclarationEncoding(Quote),
+    AfterDeclarationEncodingValue(Quote),
     AfterDeclarationEncoding,
     AfterDeclarationEncodingSpace,
 
@@ -554,6 +388,7 @@ enum State {
     AfterDeclarationStandaloneAttributeEquals,
     AfterDeclarationStandaloneAttributeEqualsSpace,
     StreamDeclarationStandalone(Quote),
+    AfterDeclarationStandaloneValue(Quote),
     AfterDeclarationStandalone,
     AfterDeclarationStandaloneSpace,
 
@@ -623,24 +458,61 @@ impl Quote {
     }
 }
 
-impl AsRef<str> for Quote {
-    fn as_ref(&self) -> &str {
+impl AsRef<[u8]> for Quote {
+    fn as_ref(&self) -> &[u8] {
         match self {
-            Self::Single => "'",
-            Self::Double => "\"",
+            Self::Single => b"'",
+            Self::Double => b"\"",
         }
     }
 }
 
-type IndexToken = UniformToken<Streaming<usize>>;
-type RollbackState = (usize, usize);
+/// Indicates how many bytes of the buffer should be skipped before the token (`pre`).
+#[derive(Debug, Copy, Clone)]
+pub struct TokenContext {
+    pub pre: usize,
+}
 
-#[derive(Debug)]
+type IndexTokenInner = UniformToken<Streaming<usize>>;
+type IndexToken = (TokenContext, IndexTokenInner);
+
+fn token_length(t: IndexTokenInner) -> usize {
+    match t {
+        Token::DeclarationStart(l) => *l.unify(),
+        Token::DeclarationEncoding(l) => *l.unify(),
+        Token::DeclarationStandalone(l) => *l.unify(),
+        Token::DeclarationClose => 0,
+        Token::ElementOpenStart(l) => *l.unify(),
+        Token::ElementOpenStartSuffix(l) => *l.unify(),
+        Token::ElementOpenStartComplete => 0,
+        Token::ElementOpenEnd => 0,
+        Token::ElementSelfClose => 0,
+        Token::ElementClose(l) => *l.unify(),
+        Token::ElementCloseSuffix(l) => *l.unify(),
+        Token::ElementCloseComplete => 0,
+        Token::AttributeStart(l) => *l.unify(),
+        Token::AttributeStartSuffix(l) => *l.unify(),
+        Token::AttributeStartComplete => 0,
+        Token::AttributeValueLiteral(l) => *l.unify(),
+        Token::AttributeValueReferenceNamed(l) => *l.unify(),
+        Token::AttributeValueReferenceDecimal(l) => *l.unify(),
+        Token::AttributeValueReferenceHex(l) => *l.unify(),
+        Token::AttributeValueEnd => 0,
+        Token::CharData(l) => *l.unify(),
+        Token::CData(l) => *l.unify(),
+        Token::ReferenceNamed(l) => *l.unify(),
+        Token::ReferenceDecimal(l) => *l.unify(),
+        Token::ReferenceHex(l) => *l.unify(),
+        Token::ProcessingInstructionStart(l) => *l.unify(),
+        Token::ProcessingInstructionValue(l) => *l.unify(),
+        Token::ProcessingInstructionEnd => 0,
+        Token::Comment(l) => *l.unify(),
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct CoreParser {
-    buffer: StringRing,
     state: State,
-    to_advance: usize,
-    rollback_to: RollbackState,
 }
 
 macro_rules! dispatch_namespaced_name {
@@ -649,34 +521,37 @@ macro_rules! dispatch_namespaced_name {
             #[inline]
             fn [<dispatch_stream_ $s>](
                 &mut self,
-                f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+                buffer: BufAdvance<'_>,
+                f: impl for<'a> FnOnce(&mut BufAdvance<'a>) -> Result<Streaming<usize>>,
             ) -> Result<Option<IndexToken>> {
-                self.stream_from_buffer(f, State::[<After $s:camel>], Token::[<$t:camel>])
+                self.stream_from_buffer(buffer, f, State::[<After $s:camel>], Token::[<$t:camel>])
             }
 
             #[inline]
-            fn [<dispatch_after_ $s>](&mut self) -> Result<Option<IndexToken>> {
-                if *self.buffer.consume(":")? {
-                    self.ratchet(State::[<Stream $s:camel Suffix>]);
-                    self.[<dispatch_stream_ $s _suffix>](StringRing::ncname)
+            fn [<dispatch_after_ $s>](&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+                if *buffer.consume(":")? {
+                    self.ratchet(State::[<Stream $s:camel Suffix>], &mut buffer);
+                    self.[<dispatch_stream_ $s _suffix>](buffer, |b| b.ncname())
                 } else {
-                    self.ratchet(State::[<After $s:camel Suffix>]);
-                    self.[<dispatch_after_ $s _suffix>]()
+                    self.ratchet(State::[<After $s:camel Suffix>], &mut buffer);
+                    self.[<dispatch_after_ $s _suffix>](buffer)
                 }
             }
 
             #[inline]
             fn [<dispatch_stream_ $s _suffix>](
                 &mut self,
-                f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+                buffer: BufAdvance<'_>,
+                f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
             ) -> Result<Option<IndexToken>> {
-                self.stream_from_buffer(f, State::[<After $s:camel Suffix>], Token::[<$t:camel Suffix>])
+                self.stream_from_buffer(buffer, f, State::[<After $s:camel Suffix>], Token::[<$t:camel Suffix>])
             }
 
             #[inline]
-            fn [<dispatch_after_ $s _suffix>](&mut self) -> Result<Option<IndexToken>> {
-                self.ratchet(State::[<After $s:camel Complete>]);
-                Ok(Some(Token::[<$t:camel Complete>]))
+            fn [<dispatch_after_ $s _suffix>](&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+                self.ratchet(State::[<After $s:camel Complete>], &mut buffer);
+                let token_ctx = buffer.into_token_context();
+                Ok(Some((token_ctx, Token::[<$t:camel Complete>])))
             }
         }
     }
@@ -686,24 +561,26 @@ macro_rules! dispatch_eq_value {
     ($k:ident $($suffix:ident)?) => {
         paste::paste! {
             #[inline]
-            fn [<dispatch_after_ $k $(_ $suffix)?>](&mut self) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $k $(_ $suffix)?>](&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
                 self.consume_space(
+                    buffer,
                     State::[<After $k:camel Space>],
                     Self::[<dispatch_after_ $k _space>],
                 )
             }
 
-            fn [<dispatch_after_ $k _space>](&mut self) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $k _space>](&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
                 use State::*;
 
-                self.buffer.require("=")?;
+                buffer.require(b"=")?;
 
-                self.ratchet([<After $k:camel Equals>]);
-                self.[<dispatch_after_ $k _equals>]()
+                self.ratchet([<After $k:camel Equals>], &mut buffer);
+                self.[<dispatch_after_ $k _equals>](buffer)
             }
 
-            fn [<dispatch_after_ $k _equals>](&mut self) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $k _equals>](&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
                 self.consume_space(
+                    buffer,
                     State::[<After $k:camel EqualsSpace>],
                     Self::[<dispatch_after_ $k _equals_space>],
                 )
@@ -712,39 +589,9 @@ macro_rules! dispatch_eq_value {
     };
 }
 
-impl Default for CoreParser {
-    fn default() -> Self {
-        Self::with_capacity(StringRing::DEFAULT_CAPACITY)
-    }
-}
-
 impl CoreParser {
     pub fn new() -> Self {
         Default::default()
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        CoreParser {
-            buffer: StringRing::with_capacity(capacity),
-            state: State::Initial,
-            to_advance: 0,
-            rollback_to: (0, 0),
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.buffer.as_str()
-    }
-
-    pub fn exchange(&self, idx: usize) -> &str {
-        &self.as_str()[..idx]
-    }
-
-    pub fn refill_using<E>(
-        &mut self,
-        f: impl FnOnce(&mut [u8]) -> Result<usize, E>,
-    ) -> Result<Result<usize, E>> {
-        self.buffer.refill_using(f)
     }
 
     // When we transition state without returning yet, we need to
@@ -754,174 +601,188 @@ impl CoreParser {
     // jump to another dispatch function. We also don't need to
     // re-set the state at the start of `next`.
     #[inline]
-    fn ratchet(&mut self, state: State) {
+    fn ratchet(&mut self, state: State, buffer: &mut BufAdvance<'_>) {
         self.state = state;
-
-        self.rollback_to = (self.buffer.n_offset_bytes, self.buffer.n_utf8_bytes)
-    }
-
-    fn rollback(&mut self) {
-        self.buffer.n_offset_bytes = self.rollback_to.0;
-        self.buffer.n_utf8_bytes = self.rollback_to.1;
+        buffer.checkpoint();
     }
 
     #[inline]
-    pub fn next_index(&mut self) -> Option<Result<IndexToken>> {
+    pub fn next_index(&mut self, buffer: &[u8], exhausted: bool) -> Option<Result<IndexToken>> {
         use State::*;
 
-        let to_advance = mem::take(&mut self.to_advance);
-        self.buffer.advance(to_advance);
+        let buffer = BufAdvance::new(buffer, exhausted);
 
-        if self.buffer.complete() {
+        if buffer.complete() {
             return match self.finish() {
                 Ok(()) => None,
                 Err(e) => Some(Err(e)),
             };
         }
 
-        self.ratchet(self.state);
-
         let token = match self.state {
-            Initial => self.dispatch_initial(),
+            Initial => self.dispatch_initial(buffer),
 
-            AfterDeclarationOpen => self.dispatch_after_declaration_open(),
-            AfterDeclarationOpenSpace => self.dispatch_after_declaration_open_space(),
+            AfterDeclarationOpen => self.dispatch_after_declaration_open(buffer),
+            AfterDeclarationOpenSpace => self.dispatch_after_declaration_open_space(buffer),
 
-            AfterDeclarationVersionAttribute => self.dispatch_after_declaration_version_attribute(),
+            AfterDeclarationVersionAttribute => {
+                self.dispatch_after_declaration_version_attribute(buffer)
+            }
             AfterDeclarationVersionAttributeSpace => {
-                self.dispatch_after_declaration_version_attribute_space()
+                self.dispatch_after_declaration_version_attribute_space(buffer)
             }
             AfterDeclarationVersionAttributeEquals => {
-                self.dispatch_after_declaration_version_attribute_equals()
+                self.dispatch_after_declaration_version_attribute_equals(buffer)
             }
             AfterDeclarationVersionAttributeEqualsSpace => {
-                self.dispatch_after_declaration_version_attribute_equals_space()
+                self.dispatch_after_declaration_version_attribute_equals_space(buffer)
             }
-            StreamDeclarationVersion(quote) => self.dispatch_stream_declaration_version(quote),
-            AfterDeclarationVersion => self.dispatch_after_declaration_version(),
-            AfterDeclarationVersionSpace => self.dispatch_after_declaration_version_space(),
+            StreamDeclarationVersion(quote) => {
+                self.dispatch_stream_declaration_version(buffer, quote)
+            }
+            AfterDeclarationVersionValue(quote) => {
+                self.dispatch_after_declaration_version_value(buffer, quote)
+            }
+            AfterDeclarationVersion => self.dispatch_after_declaration_version(buffer),
+            AfterDeclarationVersionSpace => self.dispatch_after_declaration_version_space(buffer),
 
             AfterDeclarationEncodingAttribute => {
-                self.dispatch_after_declaration_encoding_attribute()
+                self.dispatch_after_declaration_encoding_attribute(buffer)
             }
             AfterDeclarationEncodingAttributeSpace => {
-                self.dispatch_after_declaration_encoding_attribute_space()
+                self.dispatch_after_declaration_encoding_attribute_space(buffer)
             }
             AfterDeclarationEncodingAttributeEquals => {
-                self.dispatch_after_declaration_encoding_attribute_equals()
+                self.dispatch_after_declaration_encoding_attribute_equals(buffer)
             }
             AfterDeclarationEncodingAttributeEqualsSpace => {
-                self.dispatch_after_declaration_encoding_attribute_equals_space()
+                self.dispatch_after_declaration_encoding_attribute_equals_space(buffer)
             }
-            StreamDeclarationEncoding(quote) => self.dispatch_stream_declaration_encoding(quote),
-            AfterDeclarationEncoding => self.dispatch_after_declaration_encoding(),
-            AfterDeclarationEncodingSpace => self.dispatch_after_declaration_encoding_space(),
+            StreamDeclarationEncoding(quote) => {
+                self.dispatch_stream_declaration_encoding(buffer, quote)
+            }
+            AfterDeclarationEncodingValue(quote) => {
+                self.dispatch_after_declaration_encoding_value(buffer, quote)
+            }
+            AfterDeclarationEncoding => self.dispatch_after_declaration_encoding(buffer),
+            AfterDeclarationEncodingSpace => self.dispatch_after_declaration_encoding_space(buffer),
 
             AfterDeclarationStandaloneAttribute => {
-                self.dispatch_after_declaration_standalone_attribute()
+                self.dispatch_after_declaration_standalone_attribute(buffer)
             }
             AfterDeclarationStandaloneAttributeSpace => {
-                self.dispatch_after_declaration_standalone_attribute_space()
+                self.dispatch_after_declaration_standalone_attribute_space(buffer)
             }
             AfterDeclarationStandaloneAttributeEquals => {
-                self.dispatch_after_declaration_standalone_attribute_equals()
+                self.dispatch_after_declaration_standalone_attribute_equals(buffer)
             }
             AfterDeclarationStandaloneAttributeEqualsSpace => {
-                self.dispatch_after_declaration_standalone_attribute_equals_space()
+                self.dispatch_after_declaration_standalone_attribute_equals_space(buffer)
             }
             StreamDeclarationStandalone(quote) => {
-                self.dispatch_stream_declaration_standalone(quote)
+                self.dispatch_stream_declaration_standalone(buffer, quote)
             }
-            AfterDeclarationStandalone => self.dispatch_after_declaration_standalone(),
-            AfterDeclarationStandaloneSpace => self.dispatch_after_declaration_standalone_space(),
+            AfterDeclarationStandaloneValue(quote) => {
+                self.dispatch_after_declaration_standalone_value(buffer, quote)
+            }
+            AfterDeclarationStandalone => self.dispatch_after_declaration_standalone(buffer),
+            AfterDeclarationStandaloneSpace => {
+                self.dispatch_after_declaration_standalone_space(buffer)
+            }
 
             StreamElementOpenName => {
-                self.dispatch_stream_element_open_name(StringRing::ncname_continuation)
+                self.dispatch_stream_element_open_name(buffer, |b| b.ncname_continuation())
             }
-            AfterElementOpenName => self.dispatch_after_element_open_name(),
+            AfterElementOpenName => self.dispatch_after_element_open_name(buffer),
             StreamElementOpenNameSuffix => {
-                self.dispatch_stream_element_open_name_suffix(StringRing::ncname_continuation)
+                self.dispatch_stream_element_open_name_suffix(buffer, |b| b.ncname_continuation())
             }
-            AfterElementOpenNameSuffix => self.dispatch_after_element_open_name_suffix(),
-            AfterElementOpenNameComplete => self.dispatch_after_element_open_name_complete(),
+            AfterElementOpenNameSuffix => self.dispatch_after_element_open_name_suffix(buffer),
+            AfterElementOpenNameComplete => self.dispatch_after_element_open_name_complete(buffer),
             AfterElementOpenNameRequiredSpace => {
-                self.dispatch_after_element_open_name_required_space()
+                self.dispatch_after_element_open_name_required_space(buffer)
             }
-            AfterElementOpenNameSpace => self.dispatch_after_element_open_name_space(),
+            AfterElementOpenNameSpace => self.dispatch_after_element_open_name_space(buffer),
 
             StreamAttributeName => {
-                self.dispatch_stream_attribute_name(StringRing::ncname_continuation)
+                self.dispatch_stream_attribute_name(buffer, |b| b.ncname_continuation())
             }
-            AfterAttributeName => self.dispatch_after_attribute_name(),
+            AfterAttributeName => self.dispatch_after_attribute_name(buffer),
             StreamAttributeNameSuffix => {
-                self.dispatch_stream_attribute_name_suffix(StringRing::ncname_continuation)
+                self.dispatch_stream_attribute_name_suffix(buffer, |b| b.ncname_continuation())
             }
-            AfterAttributeNameSuffix => self.dispatch_after_attribute_name_suffix(),
-            AfterAttributeNameComplete => self.dispatch_after_attribute_name_complete(),
-            AfterAttributeNameSpace => self.dispatch_after_attribute_name_space(),
-            AfterAttributeNameEquals => self.dispatch_after_attribute_name_equals(),
-            AfterAttributeNameEqualsSpace => self.dispatch_after_attribute_name_equals_space(),
-            AfterAttributeOpenQuote(quote) => self.dispatch_after_attribute_open_quote(quote),
+            AfterAttributeNameSuffix => self.dispatch_after_attribute_name_suffix(buffer),
+            AfterAttributeNameComplete => self.dispatch_after_attribute_name_complete(buffer),
+            AfterAttributeNameSpace => self.dispatch_after_attribute_name_space(buffer),
+            AfterAttributeNameEquals => self.dispatch_after_attribute_name_equals(buffer),
+            AfterAttributeNameEqualsSpace => {
+                self.dispatch_after_attribute_name_equals_space(buffer)
+            }
+            AfterAttributeOpenQuote(quote) => {
+                self.dispatch_after_attribute_open_quote(buffer, quote)
+            }
             StreamAttributeValueLiteral(quote) => {
-                self.dispatch_stream_attribute_value_literal(quote)
+                self.dispatch_stream_attribute_value_literal(buffer, quote)
             }
             StreamAttributeValueReferenceHex(quote) => {
-                self.dispatch_stream_attribute_value_reference_hex(quote)
+                self.dispatch_stream_attribute_value_reference_hex(buffer, quote)
             }
             StreamAttributeValueReferenceDecimal(quote) => {
-                self.dispatch_stream_attribute_value_reference_decimal(quote)
+                self.dispatch_stream_attribute_value_reference_decimal(buffer, quote)
             }
             StreamAttributeValueReferenceNamed(quote) => self
-                .dispatch_stream_attribute_value_reference_named(
-                    quote,
-                    StringRing::ncname_continuation,
-                ),
+                .dispatch_stream_attribute_value_reference_named(buffer, quote, |b| {
+                    b.ncname_continuation()
+                }),
             AfterAttributeValueReference(quote) => {
-                self.dispatch_after_attribute_value_reference(quote)
+                self.dispatch_after_attribute_value_reference(buffer, quote)
             }
 
             StreamElementCloseName => {
-                self.dispatch_stream_element_close_name(StringRing::ncname_continuation)
+                self.dispatch_stream_element_close_name(buffer, |b| b.ncname_continuation())
             }
-            AfterElementCloseName => self.dispatch_after_element_close_name(),
+            AfterElementCloseName => self.dispatch_after_element_close_name(buffer),
             StreamElementCloseNameSuffix => {
-                self.dispatch_stream_element_close_name_suffix(StringRing::ncname_continuation)
+                self.dispatch_stream_element_close_name_suffix(buffer, |b| b.ncname_continuation())
             }
-            AfterElementCloseNameSuffix => self.dispatch_after_element_close_name_suffix(),
-            AfterElementCloseNameComplete => self.dispatch_after_element_close_name_complete(),
-            AfterElementCloseNameSpace => self.dispatch_after_element_close_name_space(),
+            AfterElementCloseNameSuffix => self.dispatch_after_element_close_name_suffix(buffer),
+            AfterElementCloseNameComplete => {
+                self.dispatch_after_element_close_name_complete(buffer)
+            }
+            AfterElementCloseNameSpace => self.dispatch_after_element_close_name_space(buffer),
 
-            StreamCharData => self.dispatch_stream_char_data(),
-            StreamCData => self.dispatch_stream_cdata(),
-            AfterCData => self.dispatch_after_cdata(),
+            StreamCharData => self.dispatch_stream_char_data(buffer),
+            StreamCData => self.dispatch_stream_cdata(buffer),
+            AfterCData => self.dispatch_after_cdata(buffer),
 
             StreamReferenceNamed => {
-                self.dispatch_stream_reference_named(StringRing::ncname_continuation)
+                self.dispatch_stream_reference_named(buffer, |b| b.ncname_continuation())
             }
-            StreamReferenceDecimal => self.dispatch_stream_reference_decimal(),
-            StreamReferenceHex => self.dispatch_stream_reference_hex(),
-            AfterReference => self.dispatch_after_reference(),
+            StreamReferenceDecimal => self.dispatch_stream_reference_decimal(buffer),
+            StreamReferenceHex => self.dispatch_stream_reference_hex(buffer),
+            AfterReference => self.dispatch_after_reference(buffer),
 
-            StreamProcessingInstructionName => {
-                self.dispatch_stream_processing_instruction_name(StringRing::ncname_continuation)
+            StreamProcessingInstructionName => self
+                .dispatch_stream_processing_instruction_name(buffer, |b| b.ncname_continuation()),
+            AfterProcessingInstructionName => {
+                self.dispatch_after_processing_instruction_name(buffer)
             }
-            AfterProcessingInstructionName => self.dispatch_after_processing_instruction_name(),
             AfterProcessingInstructionNameRequiredSpace => {
-                self.dispatch_after_processing_instruction_name_required_space()
+                self.dispatch_after_processing_instruction_name_required_space(buffer)
             }
             AfterProcessingInstructionNameSpace => {
-                self.dispatch_after_processing_instruction_name_space()
+                self.dispatch_after_processing_instruction_name_space(buffer)
             }
-            StreamProcessingInstructionValue => self.dispatch_stream_processing_instruction_value(),
-            AfterProcessingInstructionValue => self.dispatch_after_processing_instruction_value(),
+            StreamProcessingInstructionValue => {
+                self.dispatch_stream_processing_instruction_value(buffer)
+            }
+            AfterProcessingInstructionValue => {
+                self.dispatch_after_processing_instruction_value(buffer)
+            }
 
-            StreamComment => self.dispatch_stream_comment(),
-            AfterComment => self.dispatch_after_comment(),
+            StreamComment => self.dispatch_stream_comment(buffer),
+            AfterComment => self.dispatch_after_comment(buffer),
         };
-
-        if matches!(token, Err(Error::NeedsMoreInput)) {
-            self.rollback();
-        }
 
         token.transpose()
     }
@@ -931,131 +792,168 @@ impl CoreParser {
             matches!(self.state, State::Initial | State::StreamCharData),
             IncompleteXmlSnafu
         );
+
         Ok(())
     }
 
     #[inline]
-    fn dispatch_initial(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_initial(&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        // We may enter this dispatch from other dispatch functions
-        // that have advanced the buffer to the end, so we need to
-        // re-check if it is now empty.
-        if self.buffer.complete() {
-            return self.finish().map(|_| None);
-        }
-
-        if *self.buffer.consume("<")? {
-            if *self.buffer.consume("/")? {
-                self.ratchet(StreamElementCloseName);
-                return self.dispatch_stream_element_close_name(StringRing::ncname);
+        if *buffer.consume("<")? {
+            if *buffer.consume("/")? {
+                self.ratchet(StreamElementCloseName, &mut buffer);
+                return self.dispatch_stream_element_close_name(buffer, |b| b.ncname());
             }
 
-            if *self.buffer.maybe_special_tag_start_char() {
-                if *self.buffer.consume("![CDATA[")? {
-                    self.ratchet(StreamCData);
-                    return self.dispatch_stream_cdata();
+            if *buffer.maybe_special_tag_start_char() {
+                if *buffer.consume("![CDATA[")? {
+                    self.ratchet(StreamCData, &mut buffer);
+                    return self.dispatch_stream_cdata(buffer);
                 }
-                if *self.buffer.consume("!--")? {
-                    self.ratchet(StreamComment);
-                    return self.dispatch_stream_comment();
+
+                if *buffer.consume("!--")? {
+                    self.ratchet(StreamComment, &mut buffer);
+                    return self.dispatch_stream_comment(buffer);
                 }
-                if *self.buffer.consume("?")? {
-                    if *self.buffer.consume_xml()? {
-                        self.ratchet(AfterDeclarationOpen);
-                        return self.dispatch_after_declaration_open();
+
+                if *buffer.consume("?")? {
+                    if *buffer.consume_xml()? {
+                        self.ratchet(AfterDeclarationOpen, &mut buffer);
+                        return self.dispatch_after_declaration_open(buffer);
                     } else {
-                        self.ratchet(StreamProcessingInstructionName);
+                        self.ratchet(StreamProcessingInstructionName, &mut buffer);
                         return self
-                            .dispatch_stream_processing_instruction_name(StringRing::ncname);
+                            .dispatch_stream_processing_instruction_name(buffer, |b| b.ncname());
                     }
                 }
             }
 
             // regular open tag
-            self.ratchet(StreamElementOpenName);
-            return self.dispatch_stream_element_open_name(StringRing::ncname);
+            self.ratchet(StreamElementOpenName, &mut buffer);
+            return self.dispatch_stream_element_open_name(buffer, |b| b.ncname());
         }
 
-        if let Some(v) = self.buffer.first_char_data()? {
-            self.to_advance = *v.unify();
+        if *buffer.consume("&#x")? {
+            self.ratchet(StreamReferenceHex, &mut buffer);
+            self.dispatch_stream_reference_hex(buffer)
+        } else if *buffer.consume("&#")? {
+            self.ratchet(StreamReferenceDecimal, &mut buffer);
+            self.dispatch_stream_reference_decimal(buffer)
+        } else if *buffer.consume("&")? {
+            self.ratchet(StreamReferenceNamed, &mut buffer);
+            self.dispatch_stream_reference_named(buffer, |b| b.ncname())
+        } else {
+            let v = buffer.char_data()?;
 
-            if !v.is_complete() {
-                self.state = StreamCharData;
+            match v {
+                Streaming::Complete(0) | Streaming::Partial(0) => {
+                    let location = buffer.absolute_location();
+                    return InvalidXmlSnafu { location }.fail();
+                }
+
+                Streaming::Complete(_) => {
+                    // Stay in the current state
+                }
+
+                Streaming::Partial(_) => {
+                    self.ratchet(StreamCharData, &mut buffer);
+                }
             }
 
-            Ok(Some(CharData(v)))
-        } else if *self.buffer.consume("&#x")? {
-            self.ratchet(StreamReferenceHex);
-            self.dispatch_stream_reference_hex()
-        } else if *self.buffer.consume("&#")? {
-            self.ratchet(StreamReferenceDecimal);
-            self.dispatch_stream_reference_decimal()
-        } else if *self.buffer.consume("&")? {
-            self.ratchet(StreamReferenceNamed);
-            self.dispatch_stream_reference_named(StringRing::ncname)
-        } else {
-            let location = self.buffer.absolute_location();
-            InvalidXmlSnafu { location }.fail()
+            let token_ctx = buffer.into_token_context();
+
+            Ok(Some((token_ctx, CharData(v))))
         }
     }
 
-    fn dispatch_after_declaration_open(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_open(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterDeclarationOpenSpace,
             Self::dispatch_after_declaration_open_space,
         )
     }
 
-    fn dispatch_after_declaration_open_space(&mut self) -> Result<Option<IndexToken>> {
-        self.buffer.require("version")?;
-        self.ratchet(State::AfterDeclarationVersionAttribute);
-        self.dispatch_after_declaration_version_attribute()
+    fn dispatch_after_declaration_open_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
+        buffer.require(b"version")?;
+        self.ratchet(State::AfterDeclarationVersionAttribute, &mut buffer);
+        self.dispatch_after_declaration_version_attribute(buffer)
     }
 
     dispatch_eq_value!(declaration_version_attribute);
 
     fn dispatch_after_declaration_version_attribute_equals_space(
         &mut self,
+        mut buffer: BufAdvance<'_>,
     ) -> Result<Option<IndexToken>> {
-        let quote = self.buffer.require_quote()?;
+        let quote = buffer.require_quote()?;
 
-        self.ratchet(State::StreamDeclarationVersion(quote));
-        self.dispatch_stream_declaration_version(quote)
+        self.ratchet(State::StreamDeclarationVersion(quote), &mut buffer);
+        self.dispatch_stream_declaration_version(buffer, quote)
     }
 
-    fn dispatch_stream_declaration_version(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_declaration_version(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+        quote: Quote,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.plain_attribute_value(quote)?;
-
-        self.to_advance = *value.unify();
+        let value = buffer.plain_attribute_value(quote)?;
 
         if value.is_complete() {
-            self.ratchet(AfterDeclarationVersion);
-            self.to_advance += quote.as_ref().len(); // Include the closing quote
+            self.ratchet(AfterDeclarationVersionValue(quote), &mut buffer);
         }
 
-        Ok(Some(DeclarationStart(value)))
+        let token_ctx = buffer.into_token_context();
+
+        Ok(Some((token_ctx, DeclarationStart(value))))
     }
 
-    fn dispatch_after_declaration_version(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_version_value(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+        quote: Quote,
+    ) -> Result<Option<IndexToken>> {
+        use State::*;
+
+        buffer.require(quote.as_ref())?;
+        self.ratchet(AfterDeclarationVersion, &mut buffer);
+
+        self.dispatch_after_declaration_version(buffer)
+    }
+
+    fn dispatch_after_declaration_version(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterDeclarationVersionSpace,
             Self::dispatch_after_declaration_version_space,
         )
     }
 
-    fn dispatch_after_declaration_version_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_version_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use State::*;
 
         // TODO: this should require that we've seen a space in order to be allowed
-        if *self.buffer.consume("encoding")? {
-            self.ratchet(AfterDeclarationEncodingAttribute);
-            self.dispatch_after_declaration_encoding_attribute()
+        if *buffer.consume("encoding")? {
+            self.ratchet(AfterDeclarationEncodingAttribute, &mut buffer);
+            self.dispatch_after_declaration_encoding_attribute(buffer)
         } else {
-            self.ratchet(AfterDeclarationEncodingSpace);
-            self.dispatch_after_declaration_encoding_space()
+            self.ratchet(AfterDeclarationEncodingSpace, &mut buffer);
+            self.dispatch_after_declaration_encoding_space(buffer)
         }
     }
 
@@ -1063,44 +961,68 @@ impl CoreParser {
 
     fn dispatch_after_declaration_encoding_attribute_equals_space(
         &mut self,
+        mut buffer: BufAdvance<'_>,
     ) -> Result<Option<IndexToken>> {
-        let quote = self.buffer.require_quote()?;
+        let quote = buffer.require_quote()?;
 
-        self.ratchet(State::StreamDeclarationEncoding(quote));
-        self.dispatch_stream_declaration_encoding(quote)
+        self.ratchet(State::StreamDeclarationEncoding(quote), &mut buffer);
+        self.dispatch_stream_declaration_encoding(buffer, quote)
     }
 
-    fn dispatch_stream_declaration_encoding(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_declaration_encoding(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+        quote: Quote,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.plain_attribute_value(quote)?;
-
-        self.to_advance = *value.unify();
+        let value = buffer.plain_attribute_value(quote)?;
 
         if value.is_complete() {
-            self.ratchet(AfterDeclarationEncoding);
-            self.to_advance += quote.as_ref().len(); // Include the closing quote
+            self.ratchet(AfterDeclarationEncodingValue(quote), &mut buffer);
         }
 
-        Ok(Some(DeclarationEncoding(value)))
+        let token_ctx = buffer.into_token_context();
+
+        Ok(Some((token_ctx, DeclarationEncoding(value))))
     }
 
-    fn dispatch_after_declaration_encoding(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_encoding_value(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+        quote: Quote,
+    ) -> Result<Option<IndexToken>> {
+        use State::*;
+
+        buffer.require(quote.as_ref())?;
+
+        self.ratchet(AfterDeclarationEncoding, &mut buffer);
+        self.dispatch_after_declaration_encoding(buffer)
+    }
+
+    fn dispatch_after_declaration_encoding(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterDeclarationEncodingSpace,
             Self::dispatch_after_declaration_encoding_space,
         )
     }
 
-    fn dispatch_after_declaration_encoding_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_encoding_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use State::*;
 
-        if *self.buffer.consume("standalone")? {
-            self.ratchet(AfterDeclarationStandaloneAttribute);
-            self.dispatch_after_declaration_standalone_attribute()
+        if *buffer.consume("standalone")? {
+            self.ratchet(AfterDeclarationStandaloneAttribute, &mut buffer);
+            self.dispatch_after_declaration_standalone_attribute(buffer)
         } else {
-            self.ratchet(AfterDeclarationStandaloneSpace);
-            self.dispatch_after_declaration_standalone_space()
+            self.ratchet(AfterDeclarationStandaloneSpace, &mut buffer);
+            self.dispatch_after_declaration_standalone_space(buffer)
         }
     }
 
@@ -1108,60 +1030,88 @@ impl CoreParser {
 
     fn dispatch_after_declaration_standalone_attribute_equals_space(
         &mut self,
+        mut buffer: BufAdvance<'_>,
     ) -> Result<Option<IndexToken>> {
-        let quote = self.buffer.require_quote()?;
+        let quote = buffer.require_quote()?;
 
-        self.ratchet(State::StreamDeclarationStandalone(quote));
-        self.dispatch_stream_declaration_standalone(quote)
+        self.ratchet(State::StreamDeclarationStandalone(quote), &mut buffer);
+        self.dispatch_stream_declaration_standalone(buffer, quote)
     }
 
     fn dispatch_stream_declaration_standalone(
         &mut self,
+        mut buffer: BufAdvance<'_>,
         quote: Quote,
     ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.plain_attribute_value(quote)?;
-
-        self.to_advance = *value.unify();
+        let value = buffer.plain_attribute_value(quote)?;
 
         if value.is_complete() {
-            self.ratchet(AfterDeclarationStandalone);
-            self.to_advance += quote.as_ref().len(); // Include the closing quote
+            self.ratchet(AfterDeclarationStandaloneValue(quote), &mut buffer);
         }
 
-        Ok(Some(DeclarationStandalone(value)))
+        let token_ctx = buffer.into_token_context();
+
+        Ok(Some((token_ctx, DeclarationStandalone(value))))
     }
 
-    fn dispatch_after_declaration_standalone(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_standalone_value(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+        quote: Quote,
+    ) -> Result<Option<IndexToken>> {
+        use State::*;
+
+        buffer.require(quote.as_ref())?;
+
+        self.ratchet(AfterDeclarationStandalone, &mut buffer);
+        self.dispatch_after_declaration_standalone(buffer)
+    }
+
+    fn dispatch_after_declaration_standalone(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterDeclarationStandaloneSpace,
             Self::dispatch_after_declaration_standalone_space,
         )
     }
 
-    fn dispatch_after_declaration_standalone_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_declaration_standalone_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        self.buffer.require("?>")?;
+        buffer.require(b"?>")?;
 
-        self.ratchet(Initial);
-        Ok(Some(DeclarationClose))
+        self.ratchet(Initial, &mut buffer);
+        let token_ctx = buffer.into_token_context();
+        Ok(Some((token_ctx, DeclarationClose)))
     }
 
     dispatch_namespaced_name!(element_open_name, ElementOpenStart);
 
-    fn dispatch_after_element_open_name_complete(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_open_name_complete(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        if *self.buffer.consume("/>")? {
-            self.ratchet(Initial);
-            Ok(Some(ElementSelfClose))
-        } else if *self.buffer.consume(">")? {
-            self.ratchet(Initial);
-            Ok(Some(ElementOpenEnd))
+        if *buffer.consume("/>")? {
+            self.ratchet(Initial, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, ElementSelfClose)))
+        } else if *buffer.consume(">")? {
+            self.ratchet(Initial, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, ElementOpenEnd)))
         } else {
             self.require_space(
+                buffer,
                 AfterElementOpenNameRequiredSpace,
                 Self::dispatch_after_element_open_name_required_space,
             )
@@ -1169,74 +1119,108 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_after_element_open_name_required_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_open_name_required_space(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterElementOpenNameSpace,
             Self::dispatch_after_element_open_name_space,
         )
     }
 
     #[inline]
-    fn dispatch_after_element_open_name_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_open_name_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        if *self.buffer.consume("/>")? {
-            self.ratchet(Initial);
-            Ok(Some(ElementSelfClose))
-        } else if *self.buffer.consume(">")? {
-            self.ratchet(Initial);
-            Ok(Some(ElementOpenEnd))
+        if *buffer.consume("/>")? {
+            self.ratchet(Initial, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, ElementSelfClose)))
+        } else if *buffer.consume(">")? {
+            self.ratchet(Initial, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, ElementOpenEnd)))
         } else {
-            self.ratchet(StreamAttributeName);
-            self.dispatch_stream_attribute_name(StringRing::ncname)
+            self.ratchet(StreamAttributeName, &mut buffer);
+            self.dispatch_stream_attribute_name(buffer, |b| b.ncname())
         }
     }
 
     dispatch_namespaced_name!(attribute_name, AttributeStart);
     dispatch_eq_value!(attribute_name complete);
 
-    fn dispatch_after_attribute_name_equals_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_attribute_name_equals_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use State::*;
 
-        let quote = self.buffer.require_quote()?;
-        self.ratchet(AfterAttributeOpenQuote(quote));
-        self.dispatch_after_attribute_open_quote(quote)
+        let quote = buffer.require_quote()?;
+        self.ratchet(AfterAttributeOpenQuote(quote), &mut buffer);
+        self.dispatch_after_attribute_open_quote(buffer, quote)
     }
 
     #[inline]
-    fn dispatch_after_attribute_open_quote(&mut self, quote: Quote) -> Result<Option<IndexToken>> {
+    fn dispatch_after_attribute_open_quote(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+        quote: Quote,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        if *self.buffer.consume(quote)? {
-            self.ratchet(AfterElementOpenNameComplete);
-            Ok(Some(AttributeValueEnd))
-        } else if *self.buffer.consume("&#x")? {
-            self.ratchet(StreamAttributeValueReferenceHex(quote));
-            self.dispatch_stream_attribute_value_reference_hex(quote)
-        } else if *self.buffer.consume("&#")? {
-            self.ratchet(StreamAttributeValueReferenceDecimal(quote));
-            self.dispatch_stream_attribute_value_reference_decimal(quote)
-        } else if *self.buffer.consume("&")? {
-            self.ratchet(StreamAttributeValueReferenceNamed(quote));
-            self.dispatch_stream_attribute_value_reference_named(quote, StringRing::ncname)
-        } else if self.buffer.starts_with("<")? {
-            InvalidCharacterInAttributeSnafu {
-                location: self.buffer.absolute_location(),
-            }
-            .fail()
+        if *buffer.consume(quote)? {
+            self.ratchet(AfterElementOpenNameComplete, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, AttributeValueEnd)))
+        } else if *buffer.consume(b"&#x")? {
+            self.ratchet(StreamAttributeValueReferenceHex(quote), &mut buffer);
+            self.dispatch_stream_attribute_value_reference_hex(buffer, quote)
+        } else if *buffer.consume(b"&#")? {
+            self.ratchet(StreamAttributeValueReferenceDecimal(quote), &mut buffer);
+            self.dispatch_stream_attribute_value_reference_decimal(buffer, quote)
+        } else if *buffer.consume(b"&")? {
+            self.ratchet(StreamAttributeValueReferenceNamed(quote), &mut buffer);
+            self.dispatch_stream_attribute_value_reference_named(buffer, quote, |b| b.ncname())
         } else {
-            self.ratchet(StreamAttributeValueLiteral(quote));
-            self.dispatch_stream_attribute_value_literal(quote)
+            let value = buffer.attribute_value(quote)?;
+
+            match value {
+                Streaming::Complete(0) | Streaming::Partial(0) => {
+                    return InvalidCharacterInAttributeSnafu {
+                        location: buffer.absolute_location(),
+                    }
+                    .fail();
+                }
+
+                Streaming::Complete(_) => {
+                    // Stay in the current state
+                }
+
+                Streaming::Partial(_) => {
+                    self.ratchet(StreamAttributeValueLiteral(quote), &mut buffer);
+                }
+            };
+
+            let token_ctx = buffer.into_token_context();
+
+            Ok(Some((token_ctx, AttributeValueLiteral(value))))
         }
     }
 
     // -- todo: copy-pastad
     fn dispatch_stream_attribute_value_reference_named(
         &mut self,
+        buffer: BufAdvance<'_>,
         quote: Quote,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
     ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
+            buffer,
             f,
             State::AfterAttributeValueReference(quote),
             Token::AttributeValueReferenceNamed,
@@ -1245,10 +1229,12 @@ impl CoreParser {
 
     fn dispatch_stream_attribute_value_reference_decimal(
         &mut self,
+        buffer: BufAdvance<'_>,
         quote: Quote,
     ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
-            StringRing::reference_decimal,
+            buffer,
+            |b| b.reference_decimal(),
             State::AfterAttributeValueReference(quote),
             Token::AttributeValueReferenceDecimal,
         )
@@ -1256,10 +1242,12 @@ impl CoreParser {
 
     fn dispatch_stream_attribute_value_reference_hex(
         &mut self,
+        buffer: BufAdvance<'_>,
         quote: Quote,
     ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
-            StringRing::reference_hex,
+            buffer,
+            |b| b.reference_hex(),
             State::AfterAttributeValueReference(quote),
             Token::AttributeValueReferenceHex,
         )
@@ -1267,106 +1255,134 @@ impl CoreParser {
 
     fn dispatch_after_attribute_value_reference(
         &mut self,
+        mut buffer: BufAdvance<'_>,
         quote: Quote,
     ) -> Result<Option<IndexToken>> {
         use State::*;
 
-        self.buffer.require(";")?;
-        self.ratchet(AfterAttributeOpenQuote(quote));
-        self.dispatch_after_attribute_open_quote(quote)
+        buffer.require(b";")?;
+        self.ratchet(AfterAttributeOpenQuote(quote), &mut buffer);
+        self.dispatch_after_attribute_open_quote(buffer, quote)
     }
     // ---
 
     #[inline]
     fn dispatch_stream_attribute_value_literal(
         &mut self,
+        mut buffer: BufAdvance<'_>,
         quote: Quote,
     ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        let value = self.buffer.attribute_value(quote)?;
-
-        self.to_advance = *value.unify();
+        let value = buffer.attribute_value(quote)?;
 
         if value.is_complete() {
-            self.ratchet(AfterAttributeOpenQuote(quote));
+            self.ratchet(AfterAttributeOpenQuote(quote), &mut buffer);
         }
 
-        Ok(Some(AttributeValueLiteral(value)))
+        let token_ctx = buffer.into_token_context();
+
+        Ok(Some((token_ctx, AttributeValueLiteral(value))))
     }
 
     dispatch_namespaced_name!(element_close_name, ElementClose);
 
     #[inline]
-    fn dispatch_after_element_close_name_complete(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_close_name_complete(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterElementCloseNameSpace,
             Self::dispatch_after_element_close_name_space,
         )
     }
 
     #[inline]
-    fn dispatch_after_element_close_name_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_element_close_name_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use State::*;
 
-        self.buffer.require(">")?;
+        buffer.require(b">")?;
 
-        self.ratchet(Initial);
-        self.dispatch_initial()
+        self.ratchet(Initial, &mut buffer);
+        self.dispatch_initial(buffer)
     }
 
     #[inline]
     fn dispatch_stream_reference_named(
         &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+        buffer: BufAdvance<'_>,
+        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
     ) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(f, State::AfterReference, Token::ReferenceNamed)
+        self.stream_from_buffer(buffer, f, State::AfterReference, Token::ReferenceNamed)
     }
 
-    fn dispatch_stream_reference_decimal(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_reference_decimal(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
-            StringRing::reference_decimal,
+            buffer,
+            |b| b.reference_decimal(),
             State::AfterReference,
             Token::ReferenceDecimal,
         )
     }
 
-    fn dispatch_stream_reference_hex(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_reference_hex(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
-            StringRing::reference_hex,
+            buffer,
+            |b| b.reference_hex(),
             State::AfterReference,
             Token::ReferenceHex,
         )
     }
 
     #[inline]
-    fn dispatch_after_reference(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_reference(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use State::*;
 
-        self.buffer.require(";")?;
-        self.ratchet(Initial);
-        self.dispatch_initial()
+        buffer.require(b";")?;
+        self.ratchet(Initial, &mut buffer);
+        self.dispatch_initial(buffer)
     }
 
     fn dispatch_stream_processing_instruction_name(
         &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+        buffer: BufAdvance<'_>,
+        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
     ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
+            buffer,
             f,
             State::AfterProcessingInstructionName,
             Token::ProcessingInstructionStart,
         )
     }
 
-    fn dispatch_after_processing_instruction_name(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_processing_instruction_name(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        if *self.buffer.consume("?>")? {
-            self.ratchet(Initial);
-            Ok(Some(ProcessingInstructionEnd))
+        if *buffer.consume("?>")? {
+            self.ratchet(Initial, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, ProcessingInstructionEnd)))
         } else {
             self.require_space(
+                buffer,
                 AfterProcessingInstructionNameRequiredSpace,
                 Self::dispatch_after_processing_instruction_name_required_space,
             )
@@ -1375,94 +1391,109 @@ impl CoreParser {
 
     fn dispatch_after_processing_instruction_name_required_space(
         &mut self,
+        buffer: BufAdvance<'_>,
     ) -> Result<Option<IndexToken>> {
         self.consume_space(
+            buffer,
             State::AfterProcessingInstructionNameSpace,
             Self::dispatch_after_processing_instruction_name_space,
         )
     }
 
-    fn dispatch_after_processing_instruction_name_space(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_processing_instruction_name_space(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        if *self.buffer.consume("?>")? {
-            self.ratchet(Initial);
-            Ok(Some(ProcessingInstructionEnd))
+        if *buffer.consume("?>")? {
+            self.ratchet(Initial, &mut buffer);
+            let token_ctx = buffer.into_token_context();
+            Ok(Some((token_ctx, ProcessingInstructionEnd)))
         } else {
-            self.ratchet(StreamProcessingInstructionValue);
-            self.dispatch_stream_processing_instruction_value()
+            self.ratchet(StreamProcessingInstructionValue, &mut buffer);
+            self.dispatch_stream_processing_instruction_value(buffer)
         }
     }
 
-    fn dispatch_stream_processing_instruction_value(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_processing_instruction_value(
+        &mut self,
+        buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         self.stream_from_buffer(
-            StringRing::processing_instruction_value,
+            buffer,
+            |b| b.processing_instruction_value(),
             State::AfterProcessingInstructionValue,
             Token::ProcessingInstructionValue,
         )
     }
 
-    fn dispatch_after_processing_instruction_value(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_processing_instruction_value(
+        &mut self,
+        mut buffer: BufAdvance<'_>,
+    ) -> Result<Option<IndexToken>> {
         use {State::*, Token::*};
 
-        self.buffer.require("?>")?;
+        buffer.require(b"?>")?;
 
-        self.ratchet(Initial);
-        Ok(Some(ProcessingInstructionEnd))
+        self.ratchet(Initial, &mut buffer);
+        let token_ctx = buffer.into_token_context();
+        Ok(Some((token_ctx, ProcessingInstructionEnd)))
     }
 
     #[inline]
-    fn dispatch_stream_char_data(&mut self) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(StringRing::char_data, State::Initial, Token::CharData)
+    fn dispatch_stream_char_data(&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+        self.stream_from_buffer(buffer, |b| b.char_data(), State::Initial, Token::CharData)
     }
 
-    fn dispatch_stream_cdata(&mut self) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(StringRing::cdata, State::AfterCData, Token::CData)
+    fn dispatch_stream_cdata(&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+        self.stream_from_buffer(buffer, |b| b.cdata(), State::AfterCData, Token::CData)
     }
 
-    fn dispatch_after_cdata(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_cdata(&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
         use State::*;
 
-        self.buffer.require("]]>")?;
+        buffer.require(b"]]>")?;
 
-        self.ratchet(Initial);
-        self.dispatch_initial()
+        self.ratchet(Initial, &mut buffer);
+        self.dispatch_initial(buffer)
     }
 
-    fn dispatch_stream_comment(&mut self) -> Result<Option<IndexToken>> {
-        self.stream_from_buffer(StringRing::comment, State::AfterComment, Token::Comment)
+    fn dispatch_stream_comment(&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+        self.stream_from_buffer(buffer, |b| b.comment(), State::AfterComment, Token::Comment)
     }
 
-    fn dispatch_after_comment(&mut self) -> Result<Option<IndexToken>> {
+    fn dispatch_after_comment(&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
         use State::*;
 
-        self.buffer.require_or_else("-->", |location| {
+        buffer.require_or_else(b"-->", |location| {
             DoubleHyphenInCommentSnafu { location }.build()
         })?;
 
-        self.ratchet(Initial);
-        self.dispatch_initial()
+        self.ratchet(Initial, &mut buffer);
+        self.dispatch_initial(buffer)
     }
 
     // ----------
 
     fn require_space(
         &mut self,
+        mut buffer: BufAdvance<'_>,
         next_state: State,
-        next_state_fn: impl FnOnce(&mut Self) -> Result<Option<IndexToken>>,
+        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'_>) -> Result<Option<IndexToken>>,
     ) -> Result<Option<IndexToken>> {
-        match self.buffer.consume_space() {
+        match buffer.consume_space() {
             Ok(0) => RequiredSpaceMissingSnafu {
-                location: self.buffer.absolute_location(),
+                location: buffer.absolute_location(),
             }
             .fail(),
             Ok(_) => {
-                self.ratchet(next_state);
-                next_state_fn(self)
+                self.ratchet(next_state, &mut buffer);
+                next_state_fn(self, buffer)
             }
-            Err(e @ Error::NeedsMoreInputSpace { n_bytes_space: 0 }) => Err(e),
-            Err(e @ Error::NeedsMoreInputSpace { .. }) => {
-                self.ratchet(next_state);
+            Err(e @ Error::NeedsMoreInput { advance: 0 }) => Err(e),
+            Err(e @ Error::NeedsMoreInput { .. }) => {
+                self.ratchet(next_state, &mut buffer);
                 Err(e)
             }
             Err(e) => Err(e),
@@ -1471,30 +1502,33 @@ impl CoreParser {
 
     fn consume_space(
         &mut self,
+        mut buffer: BufAdvance<'_>,
         next_state: State,
-        next_state_fn: impl FnOnce(&mut Self) -> Result<Option<IndexToken>>,
+        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'_>) -> Result<Option<IndexToken>>,
     ) -> Result<Option<IndexToken>> {
-        self.buffer.consume_space()?;
+        buffer.consume_space()?;
 
-        self.ratchet(next_state);
-        next_state_fn(self)
+        self.ratchet(next_state, &mut buffer);
+        next_state_fn(self, buffer)
     }
 
     #[inline]
     fn stream_from_buffer(
         &mut self,
-        f: impl FnOnce(&mut StringRing) -> Result<Streaming<usize>>,
+        mut buffer: BufAdvance<'_>,
+        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
         next_state: State,
-        create: impl FnOnce(Streaming<usize>) -> IndexToken,
+        create: impl FnOnce(Streaming<usize>) -> IndexTokenInner,
     ) -> Result<Option<IndexToken>> {
-        let value = f(&mut self.buffer)?;
-        self.to_advance = *value.unify();
+        let value = f(&mut buffer)?;
 
         if value.is_complete() {
-            self.ratchet(next_state);
+            self.ratchet(next_state, &mut buffer);
         }
 
-        Ok(Some(create(value)))
+        let token_ctx = buffer.into_token_context();
+
+        Ok(Some((token_ctx, create(value))))
     }
 }
 
@@ -1503,7 +1537,7 @@ impl CoreParser {
 #[derive(Debug)]
 struct MustUse<T>(T);
 
-impl<T> std::ops::Deref for MustUse<T> {
+impl<T> ops::Deref for MustUse<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -1511,7 +1545,7 @@ impl<T> std::ops::Deref for MustUse<T> {
     }
 }
 
-impl<T> std::ops::DerefMut for MustUse<T> {
+impl<T> ops::DerefMut for MustUse<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.0
     }
@@ -1525,17 +1559,21 @@ pub enum RequiredToken {
     ClosingAngleBracket,
     Semicolon,
     CDataEnd,
+    DoubleQuote,
+    SingleQuote,
 }
 
 impl RequiredToken {
-    fn from_token(s: &'static str) -> Self {
+    fn from_token(s: &[u8]) -> Self {
         match s {
-            "version" => Self::Version,
-            "=" => Self::Equals,
-            "?>" => Self::QuestionMarkClosingAngleBracket,
-            ">" => Self::ClosingAngleBracket,
-            ";" => Self::Semicolon,
-            "]]>" => Self::CDataEnd,
+            b"version" => Self::Version,
+            b"=" => Self::Equals,
+            b"?>" => Self::QuestionMarkClosingAngleBracket,
+            b">" => Self::ClosingAngleBracket,
+            b";" => Self::Semicolon,
+            b"]]>" => Self::CDataEnd,
+            b"\"" => Self::DoubleQuote,
+            b"'" => Self::SingleQuote,
             _ => panic!("unknown token"),
         }
     }
@@ -1543,27 +1581,8 @@ impl RequiredToken {
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    NeedsMoreInput,
-    // This is used to avoid performing a state rollback
-    NeedsMoreInputSpace {
-        n_bytes_space: usize,
-    },
-    InputExhausted,
-
-    #[snafu(display(
-        "The {length} bytes of input data, starting at byte {location}, are not allowed in XML"
-    ))]
-    InvalidChar {
-        location: usize,
-        length: usize,
-    },
-
-    #[snafu(display(
-        "The {length} bytes of input data, starting at byte {location}, was not UTF-8"
-    ))]
-    InputNotUtf8 {
-        location: usize,
-        length: usize,
+    NeedsMoreInput {
+        advance: usize,
     },
 
     #[snafu(display("Expected the token {token:?} at byte {location}, but it was missing"))]
@@ -1601,24 +1620,111 @@ pub enum Error {
     InvalidXml {
         location: usize,
     },
+
+    #[snafu(display("Unparsed data remains at byte {location}"))]
+    ExtraData {
+        location: usize,
+    },
 }
 
 impl Error {
-    fn needs_more_input(&self) -> bool {
-        matches!(
-            self,
-            Error::NeedsMoreInput | Error::NeedsMoreInputSpace { .. }
-        )
+    fn advance_location(&mut self, delta: usize) {
+        let location = match self {
+            Error::NeedsMoreInput { .. } | Error::IncompleteXml => return,
+            Error::RequiredTokenMissing { location, .. } => location,
+            Error::RequiredSpaceMissing { location } => location,
+            Error::ExpectedSingleOrDoubleQuote { location } => location,
+            Error::InvalidCharacterInAttribute { location } => location,
+            Error::DoubleHyphenInComment { location } => location,
+            Error::InvalidXml { location } => location,
+            Error::ExtraData { location } => location,
+        };
+        *location += delta;
+    }
+
+    fn needs_more_input(&self) -> Option<usize> {
+        match self {
+            Error::NeedsMoreInput { advance } => Some(*advance),
+            _ => None,
+        }
     }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
-pub struct Parser<R> {
+struct MyBufReader<R> {
     source: R,
+    data: Box<[u8]>,
+    offset: usize,
+    valid: usize,
+    consumed: usize,
+}
+
+impl<R> MyBufReader<R> {
+    fn with_capacity(source: R, capacity: usize) -> Self {
+        Self {
+            source,
+            data: vec![0; capacity].into(),
+            offset: 0,
+            valid: 0,
+            consumed: 0,
+        }
+    }
+
+    fn valid_range(&self) -> ops::Range<usize> {
+        let start = self.offset;
+        let end = start + self.valid;
+
+        start..end
+    }
+
+    fn buffer(&self) -> &[u8] {
+        &self.data[self.valid_range()]
+    }
+
+    fn is_empty(&self) -> bool {
+        self.valid == 0
+    }
+
+    fn consume(&mut self, mut amt: usize) {
+        amt = usize::min(amt, self.valid);
+
+        self.consumed += amt;
+        self.offset += amt;
+        self.valid -= amt;
+    }
+
+    fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    fn move_to_front(&mut self) {
+        self.data.copy_within(self.valid_range(), 0);
+        self.offset = 0;
+    }
+}
+
+impl<R> MyBufReader<R>
+where
+    R: Read,
+{
+    fn top_off(&mut self) -> io::Result<usize> {
+        let invalid_part = &mut self.data[self.valid..];
+
+        let n = self.source.read(invalid_part)?;
+        self.valid += n;
+
+        Ok(n)
+    }
+}
+
+#[derive(Debug)]
+pub struct Parser<R> {
+    source: MyBufReader<R>,
     parser: CoreParser,
     exhausted: bool,
+    to_advance: usize,
 }
 
 impl<R> Parser<R>
@@ -1626,14 +1732,15 @@ where
     R: Read,
 {
     pub fn new(source: R) -> Self {
-        Self::with_buffer_capacity(source, StringRing::DEFAULT_CAPACITY)
+        Self::with_buffer_capacity(source, DEFAULT_CAPACITY)
     }
 
     pub fn with_buffer_capacity(source: R, capacity: usize) -> Self {
         Self {
-            source,
-            parser: CoreParser::with_capacity(capacity),
+            source: MyBufReader::with_capacity(source, capacity),
+            parser: CoreParser::new(),
             exhausted: false,
+            to_advance: 0,
         }
     }
 
@@ -1641,44 +1748,76 @@ where
     // non-reference types) are a workaround for the current
     // limitations of the borrow checker. If Polonius is ever merged,
     // this can be simplified.
-    pub fn next_index(&mut self) -> Option<Result<IndexToken>> {
+    pub fn next_index(&mut self) -> Option<Result<UniformToken<Streaming<usize>>>> {
         let Self {
-            parser,
             source,
+            parser,
             exhausted,
+            to_advance,
         } = self;
 
-        loop {
-            match parser.next_index() {
+        let a = mem::take(to_advance);
+        source.consume(a);
+
+        let mut r = loop {
+            match parser.next_index(source.buffer(), *exhausted) {
                 None => { /* Get more data */ }
-                Some(Err(e)) if e.needs_more_input() => { /* Get more data */ }
-                Some(Err(e)) => break Some(Err(e)),
-                Some(Ok(v)) => break Some(Ok(v)),
+
+                Some(Err(e)) => {
+                    if let Some(a) = e.needs_more_input() {
+                        source.consume(a);
+                    } else {
+                        break Some(Err(e));
+                    }
+                }
+
+                Some(Ok((ctx, v))) => {
+                    source.consume(ctx.pre);
+                    *to_advance = token_length(v);
+                    break Some(Ok(v));
+                }
             }
 
-            let n_new_bytes = parser.refill_using(|buf| source.read(buf));
+            source.move_to_front();
+            let n_new_bytes = source.top_off();
 
             match n_new_bytes {
-                Ok(Ok(0)) if *exhausted => {
+                Ok(0) if *exhausted => {
                     return match parser.finish() {
-                        Ok(()) => None,
+                        Ok(()) => {
+                            if !source.is_empty() {
+                                let location = source.consumed();
+                                let e = ExtraDataSnafu { location }.fail();
+                                Some(e)
+                            } else {
+                                None
+                            }
+                        }
                         Err(e) => Some(Err(e)),
                     }
                 }
-                Ok(Ok(0)) => {
+
+                Ok(0) => {
                     *exhausted = true;
                     continue;
                 }
-                Ok(Ok(_)) => continue,
-                Ok(Err(e)) => panic!("Report this: {}", e),
-                Err(e) => return Some(Err(e)),
+
+                Ok(_) => continue,
+
+                Err(e) => panic!("TODO: report this IO error {e} / {e:?}"),
             }
+        };
+
+        if let Some(Err(e)) = &mut r {
+            e.advance_location(source.consumed());
         }
+
+        r
     }
 
     pub fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
         let v = self.next_index();
-        v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.parser.exchange(idx)))))
+        v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.exchange(idx)))))
     }
 }
 
@@ -1762,9 +1901,15 @@ trait Exchange {
     fn exchange(&self, idx: usize) -> &str;
 }
 
-impl Exchange for CoreParser {
+impl<R> Exchange for Parser<R> {
     fn exchange(&self, idx: usize) -> &str {
-        Self::exchange(self, idx)
+        let token = &self.source.buffer()[..idx];
+
+        // This is a large performance hole. We *know* that we returned an offset that would result
+        // in valid UTF-8, so we shouldn't need to re-validate it. However, `idx` comes from
+        // untrusted input and making this function `unsafe` ruins the callsites at the moment. We
+        // shouldn't need any of this when Polonius comes to town.
+        str::from_utf8(token).unwrap()
     }
 }
 
@@ -1775,7 +1920,7 @@ struct FuseCore {
 }
 
 impl FuseCore {
-    fn push(&mut self, t: IndexToken, parser: &impl Exchange) -> Option<FusedIndexToken> {
+    fn push(&mut self, t: IndexTokenInner, parser: &impl Exchange) -> Option<FusedIndexToken> {
         use {FusedIndex::*, Streaming::*, Token::*};
 
         let Self { buffer, current } = self;
@@ -1855,7 +2000,7 @@ where
         while let Some(t) = inner.next_index() {
             match t {
                 Ok(t) => {
-                    if let Some(t) = core.push(t, &inner.parser) {
+                    if let Some(t) = core.push(t, inner) {
                         return Some(Ok(t));
                     }
                 }
@@ -1891,12 +2036,12 @@ where
             (@arm fuse $name:ident $s:ident) => {
                 match $s {
                     Buffered => $name(&*self.core.buffer),
-                    Direct(idx) => $name(self.inner.parser.exchange(idx)),
+                    Direct(idx) => $name(self.inner.exchange(idx)),
                 }
             };
 
             (@pat stream $name:ident $s:ident) => { $name($s) };
-            (@arm stream $name:ident $s:ident) => { $name($s.map(|i| self.inner.parser.exchange(i))) };
+            (@arm stream $name:ident $s:ident) => { $name($s.map(|i| self.inner.exchange(i))) };
         }
 
         fuse_invoke!(exchange_match)
@@ -1972,7 +2117,7 @@ mod test {
 
         #[track_caller]
         fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
-            Parser::with_buffer_capacity(self, StringRing::DEFAULT_CAPACITY).collect_owned()
+            Parser::with_buffer_capacity(self, DEFAULT_CAPACITY).collect_owned()
         }
     }
 
@@ -1992,7 +2137,7 @@ mod test {
     }
 
     fn minimum_capacity<T>(v: T) -> WithCapacity<T> {
-        WithCapacity(v, StringRing::MINIMUM_CAPACITY)
+        WithCapacity(v, MINIMUM_CAPACITY)
     }
 
     impl<T> TryIntoTokens for WithCapacity<T>
@@ -2806,40 +2951,69 @@ mod test {
         expect(r"<?a").to(fail_parsing_with!(Error::IncompleteXml))
     }
 
-    #[test]
-    fn fail_disallowed_ascii_char() -> Result {
-        let mut x = [b'a'; 20];
-        x[19] = 0x07;
+    mod malformed {
+        use super::*;
 
-        expect(&x)
-            .with(capacity(16))
-            .to(fail_parsing_with!(Error::InvalidChar {
-                location: 19,
-                length: 1
-            }))
-    }
+        #[test]
+        fn fail_disallowed_ascii_char() -> Result {
+            let mut x = [b'a'; 20];
+            x[19] = 0x07;
 
-    #[test]
-    fn fail_disallowed_multibyte_char() -> Result {
-        let mut x = [b'a'; 20];
-        x[17] = 0xEF;
-        x[18] = 0xBF;
-        x[19] = 0xBF;
+            expect(&x)
+                .with(capacity(16))
+                .to(fail_parsing_with!(Error::InvalidXml { location: 19 }))
+        }
 
-        expect(&x)
-            .with(capacity(16))
-            .to(fail_parsing_with!(Error::InvalidChar {
-                location: 17,
-                length: 3
-            }))
-    }
+        #[test]
+        fn fail_disallowed_multibyte_char() -> Result {
+            let mut x = [b'a'; 20];
+            x[17] = 0xEF;
+            x[18] = 0xBF;
+            x[19] = 0xBF;
 
-    #[test]
-    fn fail_non_utf_8() -> Result {
-        expect(&[b'a', b'b', b'c', 0xFF]).to(fail_parsing_with!(Error::InputNotUtf8 {
-            location: 3,
-            length: 1,
-        }))
+            expect(&x)
+                .with(capacity(16))
+                .to(fail_parsing_with!(Error::InvalidXml { location: 17 }))
+        }
+
+        #[test]
+        fn fail_non_utf_8() -> Result {
+            expect(&[b'a', b'b', b'c', 0xFF])
+                .to(fail_parsing_with!(Error::InvalidXml { location: 3 }))
+        }
+
+        #[test]
+        fn xml_declaration_closing_quote() -> Result {
+            // We were assuming that the closing quote was always present, but it could have been an
+            // invalid XML character.
+
+            expect(r#"<?xml version="1.0\u{7}?>"#).to(fail_parsing_with!(Error::IncompleteXml))
+        }
+
+        #[test]
+        fn char_data_initial() -> Result {
+            // Have enough bytes to look for a `]]>`, but those bytes aren't UTF-8 / XmlChar.
+            let x = [0xf0, 0xff, 0x7f];
+
+            expect(&x).to(fail_parsing_with!(Error::ExtraData { location: 0 }))
+        }
+
+        #[test]
+        fn char_data_continuing() -> Result {
+            // Have some initial valid UTF-8 / XmlChar, but followed by enough invalid bytes to look
+            // for a `]]>`.
+            let x = [b'a', 0xf0, 0x7f, 0x80];
+
+            expect(&x).to(fail_parsing_with!(Error::ExtraData { location: 1 }))
+        }
+
+        #[test]
+        fn processing_instruction_with_invalid_value() -> Result {
+            let mut x = *b"<?pi xx";
+            *x.last_mut().unwrap() = 0xdd;
+
+            expect(&x).to(fail_parsing_with!(Error::IncompleteXml))
+        }
     }
 
     #[test]
@@ -2971,7 +3145,7 @@ mod test {
     impl<'a> BufferedParser<'a> {
         fn new(
             tokens: impl IntoIterator<Item = UniformToken<Streaming<&'a str>>>,
-        ) -> (Self, Vec<IndexToken>) {
+        ) -> (Self, Vec<IndexTokenInner>) {
             let mut buffered = vec![];
             let mut index_tokens = vec![];
             let mut index = 0;

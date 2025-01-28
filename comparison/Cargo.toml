@@ -14,3 +14,5 @@ members = [
 sxd-pull-parser = { path = "../pull-parser" }
 sxd-validation = { path = "../validation" }
 libxml2-sys = { path = "libxml2-sys" }
+
+memchr = "2.3.4"

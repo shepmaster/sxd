@@ -22,6 +22,8 @@ members = [
     "token",
     "util",
     "validation",
+    "xml-str",
+    "xml-str/comparison",
 ]
 
 [workspace.dependencies]

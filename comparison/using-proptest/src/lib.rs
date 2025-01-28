@@ -5,7 +5,7 @@ use proptest::prelude::*;
 
 proptest! {
     #[test]
-    fn parses_everything_libxml2_does(s: String) {
-        comparison::assert_both_parse_str(&s);
+    fn parses_everything_libxml2_does(d: Vec<u8>) {
+        comparison::assert_both_parse(&d);
     }
 }

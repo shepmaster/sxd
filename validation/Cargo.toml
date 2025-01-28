@@ -11,6 +11,7 @@ pull-parser = { package = "sxd-pull-parser", path = "../pull-parser" }
 string-slab = { package = "sxd-string-slab", path = "../string-slab" }
 token = { package = "sxd-token", path = "../token" }
 util = { package = "sxd-util", path = "../util" }
+xml-str = { package = "sxd-xml-str", path = "../xml-str" }
 
 hashbrown.workspace = true
 regex = { version = "1.4.3", default-features = false, features = ["std"] }

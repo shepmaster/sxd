@@ -32,8 +32,8 @@ fn expected_version() {
     );
 }
 
-pub fn parse(s: &str) -> Result<String> {
-    Document::parse(s).map(|d| d.to_string())
+pub fn parse(d: &[u8]) -> Result<String> {
+    Document::parse(d).map(|d| d.to_string())
 }
 
 unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *const ffi::xmlError) {
@@ -51,8 +51,8 @@ unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *const ffi::x
 struct Document(*mut ffi::_xmlDoc);
 
 impl Document {
-    fn parse(s: &str) -> Result<Document> {
-        if s.contains('\0') {
+    fn parse(d: &[u8]) -> Result<Document> {
+        if d.contains(&b'\0') {
             return Err(Error::high_level(
                 "libxml2 stops processing at embedded NULs; treating this as a failure",
             ));
@@ -65,8 +65,8 @@ impl Document {
             (*ctx)._private = &mut errors as *mut _ as *mut c_void;
             ffi::xmlSetStructuredErrorFunc(ctx as _, Some(global_error_handler));
 
-            let buf = s.as_ptr() as *const c_char;
-            let buf_len = s.len().try_into().expect("Can't fit size");
+            let buf = d.as_ptr() as *const c_char;
+            let buf_len = d.len().try_into().expect("Can't fit size");
             let url = ptr::null();
             let encoding = ptr::null();
             let options = ffi::xmlParserOption_XML_PARSE_PEDANTIC as _;

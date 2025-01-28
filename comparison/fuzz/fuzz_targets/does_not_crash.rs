@@ -3,6 +3,6 @@
 
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|s: String| {
-    let _ = comparison::parse(&s);
+fuzz_target!(|d: &[u8]| {
+    let _ = comparison::parse(d);
 });
