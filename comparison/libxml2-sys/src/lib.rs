@@ -16,13 +16,27 @@ mod ffi {
     #![allow(clippy::all)]
 
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+    pub type xmlStructuredErrorFunc = ::std::option::Option<
+        unsafe extern "C" fn(userData: *mut ::std::os::raw::c_void, error: *const xmlError),
+    >;
+}
+
+#[test]
+fn expected_version() {
+    let v = CStr::from_bytes_until_nul(ffi::LIBXML_DOTTED_VERSION).unwrap_or_default();
+    let v = v.to_str().unwrap_or_default();
+    assert!(
+        v.starts_with("2.13."),
+        "This LibXML version is {v}, we expect 2.13"
+    );
 }
 
 pub fn parse(s: &str) -> Result<String> {
     Document::parse(s).map(|d| d.to_string())
 }
 
-unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *mut ffi::xmlError) {
+unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *const ffi::xmlError) {
     let ctx = ctx as *mut ffi::xmlParserCtxt;
 
     if let (Some(ctx), Some(error)) = (ctx.as_ref(), error.as_ref()) {
