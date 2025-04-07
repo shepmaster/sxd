@@ -21,6 +21,23 @@ pub fn parse(data: &[u8]) -> Result<usize> {
     Ok(count)
 }
 
+pub fn assert_both(data: &[u8]) {
+    let data = trim_to_first_nul(data);
+
+    match (libxml2_sys::parse(data), parse(data)) {
+        (Ok(_), Ok(_)) => {}
+        (Err(_), Err(_)) => {}
+
+        (Ok(lx), Err(e)) => {
+            panic!("libxml2 parsed {data:?} as {lx}, but we failed due to {e} / {e:?}");
+        }
+
+        (Err(e), Ok(_)) => {
+            panic!("libxml2 failed to parse {data:?} due to {e}, but we succeeded");
+        }
+    }
+}
+
 pub fn assert_both_parse(data: &[u8]) {
     let data = trim_to_first_nul(data);
 

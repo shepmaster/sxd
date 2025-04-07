@@ -2951,6 +2951,11 @@ mod test {
         expect(r"<?a").to(fail_parsing_with!(Error::IncompleteXml))
     }
 
+    #[test]
+    fn fail_char_data_with_repeated_square_brackets() -> Result {
+        expect("<a>b]]]></a>").to(fail_parsing_with!(Error::InvalidXml { location: 5 }))
+    }
+
     mod malformed {
         use super::*;
 

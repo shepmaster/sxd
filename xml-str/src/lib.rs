@@ -510,7 +510,8 @@ impl InternalSliceExt for [u8] {
 
                                 // We know it's definitely not `]]>`
                                 Some(_) => {
-                                    i += 2;
+                                    // Only advance by one byte in case we are parsing `]]]>`
+                                    i += 1;
                                     continue;
                                 }
 
