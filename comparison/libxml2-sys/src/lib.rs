@@ -154,6 +154,7 @@ impl Error {
                 | ffi::xmlParserErrors_XML_WAR_SPACE_VALUE // `xml:space` invalid
                 | ffi::xmlParserErrors_XML_NS_ERR_UNDEFINED_NAMESPACE
                 | ffi::xmlParserErrors_XML_DTD_XMLID_VALUE // `xml:id="1"`
+                | ffi::xmlParserErrors_XML_DTD_ID_REDEFINED // `xml:id="1"` twice
                 => Ok(()),
 
             _ => {
