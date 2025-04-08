@@ -1976,6 +1976,15 @@ mod test {
         }
     }
 
+    impl<const N: usize> TryIntoTokens for &[u8; N] {
+        type Error = Error;
+
+        #[track_caller]
+        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
+            <&[u8] as TryIntoTokens>::try_into_tokens(self)
+        }
+    }
+
     struct WithCapacity<T>(T, usize);
 
     fn capacity<T>(c: usize) -> impl FnOnce(T) -> WithCapacity<T> {
@@ -1986,21 +1995,15 @@ mod test {
         WithCapacity(v, StringRing::MINIMUM_CAPACITY)
     }
 
-    impl TryIntoTokens for WithCapacity<&str> {
+    impl<T> TryIntoTokens for WithCapacity<T>
+    where
+        T: AsRef<[u8]>,
+    {
         type Error = Error;
 
         #[track_caller]
         fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
-            WithCapacity(self.0.as_bytes(), self.1).try_into_tokens()
-        }
-    }
-
-    impl TryIntoTokens for WithCapacity<&[u8]> {
-        type Error = Error;
-
-        #[track_caller]
-        fn try_into_tokens(self) -> Result<OwnedTokens, Self::Error> {
-            Parser::with_buffer_capacity(self.0, self.1).collect_owned()
+            Parser::with_buffer_capacity(self.0.as_ref(), self.1).collect_owned()
         }
     }
 
@@ -2808,7 +2811,7 @@ mod test {
         let mut x = [b'a'; 20];
         x[19] = 0x07;
 
-        expect(&x[..])
+        expect(&x)
             .with(capacity(16))
             .to(fail_parsing_with!(Error::InvalidChar {
                 location: 19,
@@ -2823,7 +2826,7 @@ mod test {
         x[18] = 0xBF;
         x[19] = 0xBF;
 
-        expect(&x[..])
+        expect(&x)
             .with(capacity(16))
             .to(fail_parsing_with!(Error::InvalidChar {
                 location: 17,
@@ -2833,7 +2836,7 @@ mod test {
 
     #[test]
     fn fail_non_utf_8() -> Result {
-        expect(&[b'a', b'b', b'c', 0xFF][..]).to(fail_parsing_with!(Error::InputNotUtf8 {
+        expect(&[b'a', b'b', b'c', 0xFF]).to(fail_parsing_with!(Error::InputNotUtf8 {
             location: 3,
             length: 1,
         }))
