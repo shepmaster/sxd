@@ -128,10 +128,6 @@ impl<'b> BufAdvance<'b> {
         self.advance
     }
 
-    fn complete(&self) -> bool {
-        self.buffer.is_empty() && self.exhausted
-    }
-
     fn starts_with(&self, needle: &[u8]) -> Result<bool> {
         let s = abandon!(self.weak_min_str(needle.len()));
         Ok(s.starts_with(needle))
@@ -525,12 +521,12 @@ macro_rules! dispatch_namespaced_name {
                 &mut self,
                 buffer: BufAdvance<'b>,
                 f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
-            ) -> Result<Option<IndexToken<'b>>> {
+            ) -> Result<IndexToken<'b>> {
                 self.stream_from_buffer(buffer, f, State::[<After $s:camel>], Token::[<$t:camel>])
             }
 
             #[inline]
-            fn [<dispatch_after_ $s>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
+            fn [<dispatch_after_ $s>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
                 if *buffer.consume(":")? {
                     self.ratchet(State::[<Stream $s:camel Suffix>], &mut buffer);
                     self.[<dispatch_stream_ $s _suffix>](buffer, |b| b.ncname())
@@ -545,15 +541,15 @@ macro_rules! dispatch_namespaced_name {
                 &mut self,
                 buffer: BufAdvance<'b>,
                 f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
-            ) -> Result<Option<IndexToken<'b>>> {
+            ) -> Result<IndexToken<'b>> {
                 self.stream_from_buffer(buffer, f, State::[<After $s:camel Suffix>], Token::[<$t:camel Suffix>])
             }
 
             #[inline]
-            fn [<dispatch_after_ $s _suffix>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
+            fn [<dispatch_after_ $s _suffix>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
                 self.ratchet(State::[<After $s:camel Complete>], &mut buffer);
                 let token_ctx = buffer.into_token_context();
-                Ok(Some((token_ctx, Token::[<$t:camel Complete>])))
+                Ok((token_ctx, Token::[<$t:camel Complete>]))
             }
         }
     }
@@ -563,7 +559,7 @@ macro_rules! dispatch_eq_value {
     ($k:ident $($suffix:ident)?) => {
         paste::paste! {
             #[inline]
-            fn [<dispatch_after_ $k $(_ $suffix)?>]<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
+            fn [<dispatch_after_ $k $(_ $suffix)?>]<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
                 self.consume_space(
                     buffer,
                     State::[<After $k:camel Space>],
@@ -571,7 +567,7 @@ macro_rules! dispatch_eq_value {
                 )
             }
 
-            fn [<dispatch_after_ $k _space>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
+            fn [<dispatch_after_ $k _space>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
                 use State::*;
 
                 buffer.require(b"=")?;
@@ -580,7 +576,7 @@ macro_rules! dispatch_eq_value {
                 self.[<dispatch_after_ $k _equals>](buffer)
             }
 
-            fn [<dispatch_after_ $k _equals>]<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
+            fn [<dispatch_after_ $k _equals>]<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
                 self.consume_space(
                     buffer,
                     State::[<After $k:camel EqualsSpace>],
@@ -609,23 +605,12 @@ impl CoreParser {
     }
 
     #[inline]
-    pub fn next_token<'b>(
-        &mut self,
-        buffer: &'b [u8],
-        exhausted: bool,
-    ) -> Option<Result<IndexToken<'b>>> {
+    pub fn next_token<'b>(&mut self, buffer: &'b [u8], exhausted: bool) -> Result<IndexToken<'b>> {
         use State::*;
 
         let buffer = BufAdvance::new(buffer, exhausted);
 
-        if buffer.complete() {
-            return match self.finish() {
-                Ok(()) => None,
-                Err(e) => Some(Err(e)),
-            };
-        }
-
-        let token = match self.state {
+        match self.state {
             Initial => self.dispatch_initial(buffer),
 
             AfterDeclarationOpen => self.dispatch_after_declaration_open(buffer),
@@ -788,9 +773,7 @@ impl CoreParser {
 
             StreamComment => self.dispatch_stream_comment(buffer),
             AfterComment => self.dispatch_after_comment(buffer),
-        };
-
-        token.transpose()
+        }
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -803,10 +786,7 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_initial<'b>(
-        &mut self,
-        mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    fn dispatch_initial<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         if *buffer.consume("<")? {
@@ -872,14 +852,14 @@ impl CoreParser {
 
             let token_ctx = buffer.into_token_context();
 
-            Ok(Some((token_ctx, CharData(v))))
+            Ok((token_ctx, CharData(v)))
         }
     }
 
     fn dispatch_after_declaration_open<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationOpenSpace,
@@ -890,7 +870,7 @@ impl CoreParser {
     fn dispatch_after_declaration_open_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         buffer.require(b"version")?;
         self.ratchet(State::AfterDeclarationVersionAttribute, &mut buffer);
         self.dispatch_after_declaration_version_attribute(buffer)
@@ -901,7 +881,7 @@ impl CoreParser {
     fn dispatch_after_declaration_version_attribute_equals_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         let quote = buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationVersion(quote), &mut buffer);
@@ -912,7 +892,7 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         let value = buffer.plain_attribute_value(quote)?;
@@ -923,14 +903,14 @@ impl CoreParser {
 
         let token_ctx = buffer.into_token_context();
 
-        Ok(Some((token_ctx, DeclarationStart(value))))
+        Ok((token_ctx, DeclarationStart(value)))
     }
 
     fn dispatch_after_declaration_version_value<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(quote.as_ref())?;
@@ -942,7 +922,7 @@ impl CoreParser {
     fn dispatch_after_declaration_version<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationVersionSpace,
@@ -953,7 +933,7 @@ impl CoreParser {
     fn dispatch_after_declaration_version_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         // TODO: this should require that we've seen a space in order to be allowed
@@ -971,7 +951,7 @@ impl CoreParser {
     fn dispatch_after_declaration_encoding_attribute_equals_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         let quote = buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationEncoding(quote), &mut buffer);
@@ -982,7 +962,7 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         let value = buffer.plain_attribute_value(quote)?;
@@ -993,14 +973,14 @@ impl CoreParser {
 
         let token_ctx = buffer.into_token_context();
 
-        Ok(Some((token_ctx, DeclarationEncoding(value))))
+        Ok((token_ctx, DeclarationEncoding(value)))
     }
 
     fn dispatch_after_declaration_encoding_value<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(quote.as_ref())?;
@@ -1012,7 +992,7 @@ impl CoreParser {
     fn dispatch_after_declaration_encoding<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationEncodingSpace,
@@ -1023,7 +1003,7 @@ impl CoreParser {
     fn dispatch_after_declaration_encoding_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         if *buffer.consume("standalone")? {
@@ -1040,7 +1020,7 @@ impl CoreParser {
     fn dispatch_after_declaration_standalone_attribute_equals_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         let quote = buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationStandalone(quote), &mut buffer);
@@ -1051,7 +1031,7 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         let value = buffer.plain_attribute_value(quote)?;
@@ -1062,14 +1042,14 @@ impl CoreParser {
 
         let token_ctx = buffer.into_token_context();
 
-        Ok(Some((token_ctx, DeclarationStandalone(value))))
+        Ok((token_ctx, DeclarationStandalone(value)))
     }
 
     fn dispatch_after_declaration_standalone_value<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(quote.as_ref())?;
@@ -1081,7 +1061,7 @@ impl CoreParser {
     fn dispatch_after_declaration_standalone<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationStandaloneSpace,
@@ -1092,14 +1072,14 @@ impl CoreParser {
     fn dispatch_after_declaration_standalone_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         buffer.require(b"?>")?;
 
         self.ratchet(Initial, &mut buffer);
         let token_ctx = buffer.into_token_context();
-        Ok(Some((token_ctx, DeclarationClose)))
+        Ok((token_ctx, DeclarationClose))
     }
 
     dispatch_namespaced_name!(element_open_name, ElementOpenStart);
@@ -1107,17 +1087,17 @@ impl CoreParser {
     fn dispatch_after_element_open_name_complete<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         if *buffer.consume("/>")? {
             self.ratchet(Initial, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, ElementSelfClose)))
+            Ok((token_ctx, ElementSelfClose))
         } else if *buffer.consume(">")? {
             self.ratchet(Initial, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, ElementOpenEnd)))
+            Ok((token_ctx, ElementOpenEnd))
         } else {
             self.require_space(
                 buffer,
@@ -1131,7 +1111,7 @@ impl CoreParser {
     fn dispatch_after_element_open_name_required_space<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterElementOpenNameSpace,
@@ -1143,17 +1123,17 @@ impl CoreParser {
     fn dispatch_after_element_open_name_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         if *buffer.consume("/>")? {
             self.ratchet(Initial, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, ElementSelfClose)))
+            Ok((token_ctx, ElementSelfClose))
         } else if *buffer.consume(">")? {
             self.ratchet(Initial, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, ElementOpenEnd)))
+            Ok((token_ctx, ElementOpenEnd))
         } else {
             self.ratchet(StreamAttributeName, &mut buffer);
             self.dispatch_stream_attribute_name(buffer, |b| b.ncname())
@@ -1166,7 +1146,7 @@ impl CoreParser {
     fn dispatch_after_attribute_name_equals_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         let quote = buffer.require_quote()?;
@@ -1179,13 +1159,13 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         if *buffer.consume(quote)? {
             self.ratchet(AfterElementOpenNameComplete, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, AttributeValueEnd)))
+            Ok((token_ctx, AttributeValueEnd))
         } else if *buffer.consume(b"&#x")? {
             self.ratchet(StreamAttributeValueReferenceHex(quote), &mut buffer);
             self.dispatch_stream_attribute_value_reference_hex(buffer, quote)
@@ -1217,7 +1197,7 @@ impl CoreParser {
 
             let token_ctx = buffer.into_token_context();
 
-            Ok(Some((token_ctx, AttributeValueLiteral(value))))
+            Ok((token_ctx, AttributeValueLiteral(value)))
         }
     }
 
@@ -1227,7 +1207,7 @@ impl CoreParser {
         buffer: BufAdvance<'b>,
         quote: Quote,
         f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             f,
@@ -1240,7 +1220,7 @@ impl CoreParser {
         &mut self,
         buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_decimal(),
@@ -1253,7 +1233,7 @@ impl CoreParser {
         &mut self,
         buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_hex(),
@@ -1266,7 +1246,7 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(b";")?;
@@ -1280,7 +1260,7 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         let value = buffer.attribute_value(quote)?;
@@ -1291,7 +1271,7 @@ impl CoreParser {
 
         let token_ctx = buffer.into_token_context();
 
-        Ok(Some((token_ctx, AttributeValueLiteral(value))))
+        Ok((token_ctx, AttributeValueLiteral(value)))
     }
 
     dispatch_namespaced_name!(element_close_name, ElementClose);
@@ -1300,7 +1280,7 @@ impl CoreParser {
     fn dispatch_after_element_close_name_complete<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterElementCloseNameSpace,
@@ -1312,7 +1292,7 @@ impl CoreParser {
     fn dispatch_after_element_close_name_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(b">")?;
@@ -1326,14 +1306,14 @@ impl CoreParser {
         &mut self,
         buffer: BufAdvance<'b>,
         f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(buffer, f, State::AfterReference, Token::ReferenceNamed)
     }
 
     fn dispatch_stream_reference_decimal<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_decimal(),
@@ -1345,7 +1325,7 @@ impl CoreParser {
     fn dispatch_stream_reference_hex<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_hex(),
@@ -1358,7 +1338,7 @@ impl CoreParser {
     fn dispatch_after_reference<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(b";")?;
@@ -1370,7 +1350,7 @@ impl CoreParser {
         &mut self,
         buffer: BufAdvance<'b>,
         f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             f,
@@ -1382,13 +1362,13 @@ impl CoreParser {
     fn dispatch_after_processing_instruction_name<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         if *buffer.consume("?>")? {
             self.ratchet(Initial, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, ProcessingInstructionEnd)))
+            Ok((token_ctx, ProcessingInstructionEnd))
         } else {
             self.require_space(
                 buffer,
@@ -1401,7 +1381,7 @@ impl CoreParser {
     fn dispatch_after_processing_instruction_name_required_space<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.consume_space(
             buffer,
             State::AfterProcessingInstructionNameSpace,
@@ -1412,13 +1392,13 @@ impl CoreParser {
     fn dispatch_after_processing_instruction_name_space<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         if *buffer.consume("?>")? {
             self.ratchet(Initial, &mut buffer);
             let token_ctx = buffer.into_token_context();
-            Ok(Some((token_ctx, ProcessingInstructionEnd)))
+            Ok((token_ctx, ProcessingInstructionEnd))
         } else {
             self.ratchet(StreamProcessingInstructionValue, &mut buffer);
             self.dispatch_stream_processing_instruction_value(buffer)
@@ -1428,7 +1408,7 @@ impl CoreParser {
     fn dispatch_stream_processing_instruction_value<'b>(
         &mut self,
         buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(
             buffer,
             |b| b.processing_instruction_value(),
@@ -1440,35 +1420,26 @@ impl CoreParser {
     fn dispatch_after_processing_instruction_value<'b>(
         &mut self,
         mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         use {State::*, Token::*};
 
         buffer.require(b"?>")?;
 
         self.ratchet(Initial, &mut buffer);
         let token_ctx = buffer.into_token_context();
-        Ok(Some((token_ctx, ProcessingInstructionEnd)))
+        Ok((token_ctx, ProcessingInstructionEnd))
     }
 
     #[inline]
-    fn dispatch_stream_char_data<'b>(
-        &mut self,
-        buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    fn dispatch_stream_char_data<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(buffer, |b| b.char_data(), State::Initial, Token::CharData)
     }
 
-    fn dispatch_stream_cdata<'b>(
-        &mut self,
-        buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    fn dispatch_stream_cdata<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(buffer, |b| b.cdata(), State::AfterCData, Token::CData)
     }
 
-    fn dispatch_after_cdata<'b>(
-        &mut self,
-        mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    fn dispatch_after_cdata<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require(b"]]>")?;
@@ -1477,17 +1448,11 @@ impl CoreParser {
         self.dispatch_initial(buffer)
     }
 
-    fn dispatch_stream_comment<'b>(
-        &mut self,
-        buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    fn dispatch_stream_comment<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
         self.stream_from_buffer(buffer, |b| b.comment(), State::AfterComment, Token::Comment)
     }
 
-    fn dispatch_after_comment<'b>(
-        &mut self,
-        mut buffer: BufAdvance<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    fn dispatch_after_comment<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<IndexToken<'b>> {
         use State::*;
 
         buffer.require_or_else(b"-->", |location| {
@@ -1504,8 +1469,8 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         next_state: State,
-        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'b>) -> Result<Option<IndexToken<'b>>>,
-    ) -> Result<Option<IndexToken<'b>>> {
+        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'b>) -> Result<IndexToken<'b>>,
+    ) -> Result<IndexToken<'b>> {
         match buffer.consume_space() {
             Ok(0) => RequiredSpaceMissingSnafu {
                 location: buffer.absolute_location(),
@@ -1528,8 +1493,8 @@ impl CoreParser {
         &mut self,
         mut buffer: BufAdvance<'b>,
         next_state: State,
-        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'b>) -> Result<Option<IndexToken<'b>>>,
-    ) -> Result<Option<IndexToken<'b>>> {
+        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'b>) -> Result<IndexToken<'b>>,
+    ) -> Result<IndexToken<'b>> {
         buffer.consume_space()?;
 
         self.ratchet(next_state, &mut buffer);
@@ -1543,7 +1508,7 @@ impl CoreParser {
         f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
         next_state: State,
         create: impl FnOnce(Streaming<&'b str>) -> IndexTokenInner<'b>,
-    ) -> Result<Option<IndexToken<'b>>> {
+    ) -> Result<IndexToken<'b>> {
         let value = f(&mut buffer)?;
 
         if value.is_complete() {
@@ -1552,7 +1517,7 @@ impl CoreParser {
 
         let token_ctx = buffer.into_token_context();
 
-        Ok(Some((token_ctx, create(value))))
+        Ok((token_ctx, create(value)))
     }
 }
 
@@ -1786,9 +1751,7 @@ where
 
             polonius_the_crab::polonius!(|source| -> Option<Result<IndexTokenInner<'polonius>>> {
                 match parser.next_token(source.buffer(), *exhausted) {
-                    None => { /* Get more data */ }
-
-                    Some(Err(mut e)) => {
+                    Err(mut e) => {
                         if let Some(a) = e.needs_more_input() {
                             *to_advance = a;
                         } else {
@@ -1798,7 +1761,7 @@ where
                         }
                     }
 
-                    Some(Ok((ctx, v))) => {
+                    Ok((ctx, v)) => {
                         *to_advance = ctx.pre + token_length(v);
                         polonius_the_crab::polonius_return!(Some(Ok(v)));
                     }
