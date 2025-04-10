@@ -1771,31 +1771,30 @@ where
             let a = mem::take(to_advance);
             source.consume(a);
 
+            if *exhausted {
+                return match parser.finish() {
+                    Ok(()) => {
+                        if source.is_empty() {
+                            None
+                        } else {
+                            let location = source.consumed();
+                            let e = ExtraDataSnafu { location }.fail();
+                            Some(e)
+                        }
+                    }
+
+                    Err(e) => Some(Err(e)),
+                };
+            }
+
             source.move_to_front();
             let n_new_bytes = source.top_off();
 
             match n_new_bytes {
-                Ok(0) if *exhausted => {
-                    return match parser.finish() {
-                        Ok(()) => {
-                            if !source.is_empty() {
-                                let location = source.consumed();
-                                let e = ExtraDataSnafu { location }.fail();
-                                Some(e)
-                            } else {
-                                None
-                            }
-                        }
-                        Err(e) => Some(Err(e)),
-                    };
-                }
-
-                Ok(0) => {
-                    *exhausted = true;
+                Ok(l) => {
+                    *exhausted = l == 0;
                     continue;
                 }
-
-                Ok(_) => continue,
 
                 Err(e) => panic!("TODO: report this IO error {e} / {e:?}"),
             }
