@@ -7,7 +7,7 @@ use std::{
     fmt,
     io::{self, Read},
     marker::PhantomData,
-    mem, ops, str,
+    ops, str,
 };
 use token::{IsComplete, Streaming, Token, TokenKind, UniformToken};
 use xml_str::{SliceExt, U8Ext};
@@ -1645,9 +1645,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 struct MyBufReader<R> {
     source: R,
     data: Box<[u8]>,
-    offset: usize,
-    valid: usize,
-    consumed: usize,
+    meta: Meta,
 }
 
 impl<R> MyBufReader<R> {
@@ -1655,12 +1653,52 @@ impl<R> MyBufReader<R> {
         Self {
             source,
             data: vec![0; capacity].into(),
-            offset: 0,
-            valid: 0,
-            consumed: 0,
+            meta: Default::default(),
         }
     }
 
+    fn buffer(&mut self) -> (&[u8], &mut Meta) {
+        let buf = &self.data[self.meta.valid_range()];
+
+        (buf, &mut self.meta)
+    }
+
+    fn consumed(&self) -> usize {
+        self.meta.consumed()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.meta.is_empty()
+    }
+
+    fn move_to_front(&mut self) {
+        self.data.copy_within(self.meta.valid_range(), 0);
+        self.meta.offset = 0;
+    }
+}
+
+impl<R> MyBufReader<R>
+where
+    R: Read,
+{
+    fn top_off(&mut self) -> io::Result<usize> {
+        let invalid_part = &mut self.data[self.meta.valid..];
+
+        let n = self.source.read(invalid_part)?;
+        self.meta.valid += n;
+
+        Ok(n)
+    }
+}
+
+#[derive(Debug, Default)]
+struct Meta {
+    offset: usize,
+    valid: usize,
+    consumed: usize,
+}
+
+impl Meta {
     fn valid_range(&self) -> ops::Range<usize> {
         let start = self.offset;
         let end = start + self.valid;
@@ -1668,12 +1706,12 @@ impl<R> MyBufReader<R> {
         start..end
     }
 
-    fn buffer(&self) -> &[u8] {
-        &self.data[self.valid_range()]
-    }
-
     fn is_empty(&self) -> bool {
         self.valid == 0
+    }
+
+    fn consumed(&self) -> usize {
+        self.consumed
     }
 
     fn consume(&mut self, mut amt: usize) {
@@ -1683,29 +1721,6 @@ impl<R> MyBufReader<R> {
         self.offset += amt;
         self.valid -= amt;
     }
-
-    fn consumed(&self) -> usize {
-        self.consumed
-    }
-
-    fn move_to_front(&mut self) {
-        self.data.copy_within(self.valid_range(), 0);
-        self.offset = 0;
-    }
-}
-
-impl<R> MyBufReader<R>
-where
-    R: Read,
-{
-    fn top_off(&mut self) -> io::Result<usize> {
-        let invalid_part = &mut self.data[self.valid..];
-
-        let n = self.source.read(invalid_part)?;
-        self.valid += n;
-
-        Ok(n)
-    }
 }
 
 #[derive(Debug)]
@@ -1713,7 +1728,6 @@ pub struct Parser<R> {
     source: MyBufReader<R>,
     parser: CoreParser,
     exhausted: bool,
-    to_advance: usize,
 }
 
 impl<R> Parser<R>
@@ -1729,7 +1743,6 @@ where
             source: MyBufReader::with_capacity(source, capacity),
             parser: CoreParser::new(),
             exhausted: false,
-            to_advance: 0,
         }
     }
 
@@ -1738,38 +1751,30 @@ where
             source,
             parser,
             exhausted,
-            to_advance,
         } = self;
 
         let mut source = source;
 
-        let a = mem::take(to_advance);
-        source.consume(a);
-
         loop {
-            let consumed = source.consumed();
-
             polonius_the_crab::polonius!(|source| -> Option<Result<IndexTokenInner<'polonius>>> {
-                match parser.next_token(source.buffer(), *exhausted) {
+                let (buffer, meta) = source.buffer();
+
+                match parser.next_token(buffer, *exhausted) {
                     Err(mut e) => {
                         if let Some(a) = e.needs_more_input() {
-                            *to_advance = a;
+                            meta.consume(a);
                         } else {
-                            e.advance_location(consumed);
-
+                            e.advance_location(meta.consumed());
                             polonius_the_crab::polonius_return!(Some(Err(e)));
                         }
                     }
 
                     Ok((ctx, v)) => {
-                        *to_advance = ctx.pre + token_length(v);
+                        meta.consume(ctx.pre + token_length(v));
                         polonius_the_crab::polonius_return!(Some(Ok(v)));
                     }
                 }
             });
-
-            let a = mem::take(to_advance);
-            source.consume(a);
 
             if *exhausted {
                 return match parser.finish() {
