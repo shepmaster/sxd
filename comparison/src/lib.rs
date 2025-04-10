@@ -13,7 +13,7 @@ pub fn parse(data: &[u8]) -> Result<usize> {
     let mut parser = Validator::new(Parser::new(data));
     let mut count = 0;
 
-    while let Some(v) = parser.next_str() {
+    while let Some(v) = parser.next_token() {
         v?;
         count += 1;
     }

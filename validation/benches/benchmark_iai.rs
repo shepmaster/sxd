@@ -10,7 +10,7 @@ fn parse(file: &str) -> usize {
     let mut parser = Validator::new(parser);
 
     let mut count = 0usize;
-    while let Some(v) = parser.next_index() {
+    while let Some(v) = parser.next_token() {
         v.unwrap();
         count += 1;
     }

@@ -1,7 +1,7 @@
 #![deny(rust_2018_idioms)]
 
 use hashbrown::HashSet;
-use pull_parser::{Fuse, FusedIndexToken, FusedToken, Parser};
+use pull_parser::{Fuse, FusedToken, Parser};
 use regex::Regex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{io::Read, sync::LazyLock};
@@ -487,30 +487,20 @@ where
         }
     }
 
-    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken>> {
+    pub fn next_token(&mut self) -> Option<Result<FusedToken<'_>>> {
         let Self { parser, core } = self;
 
-        match parser.next_index() {
+        match parser.next_token() {
             None => match core.finish() {
                 Ok(()) => None,
                 Err(e) => Some(Err(e)),
             },
-            Some(Ok(v)) => {
-                let v2 = parser.exchange(v);
-
-                match core.push(v2) {
-                    Ok(()) => Some(Ok(v)),
-                    Err(e) => Some(Err(e)),
-                }
-            }
+            Some(Ok(v)) => match core.push(v) {
+                Ok(()) => Some(Ok(v)),
+                Err(e) => Some(Err(e)),
+            },
             Some(Err(e)) => Some(Err(e.into())),
         }
-    }
-
-    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>>> {
-        let v = self.next_index();
-        let parser = &self.parser;
-        v.map(|r| r.map(|t| parser.exchange(t)))
     }
 }
 

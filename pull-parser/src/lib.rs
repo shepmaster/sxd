@@ -57,8 +57,8 @@ impl<'a> fmt::Debug for MaybeUtf8<'a> {
 const MINIMUM_CAPACITY: usize = 16;
 const DEFAULT_CAPACITY: usize = 1024;
 
-struct BufAdvance<'a> {
-    buffer: &'a [u8],
+struct BufAdvance<'b> {
+    buffer: &'b [u8],
     advance: usize,
     checkpoint: usize,
     exhausted: bool,
@@ -75,8 +75,8 @@ impl fmt::Debug for BufAdvance<'_> {
     }
 }
 
-impl<'a> BufAdvance<'a> {
-    fn new(buffer: &'a [u8], exhausted: bool) -> Self {
+impl<'b> BufAdvance<'b> {
+    fn new(buffer: &'b [u8], exhausted: bool) -> Self {
         Self {
             buffer,
             advance: 0,
@@ -91,7 +91,7 @@ impl<'a> BufAdvance<'a> {
 
     /// Tries to return a string with the given byte length, but if
     /// the input is exhausted, the returned string may be shorter.
-    fn weak_min_str(&self, len: usize) -> Result<&'a [u8]> {
+    fn weak_min_str(&self, len: usize) -> Result<&'b [u8]> {
         ensure!(
             self.buffer.len() >= len || self.exhausted,
             NeedsMoreInputSnafu {
@@ -102,7 +102,7 @@ impl<'a> BufAdvance<'a> {
         Ok(self.buffer)
     }
 
-    fn min_bytes(&self, len: usize) -> Result<&'a [u8]> {
+    fn min_bytes(&self, len: usize) -> Result<&'b [u8]> {
         ensure!(
             self.buffer.enough_to_parse() && self.buffer.len() >= len,
             NeedsMoreInputSnafu {
@@ -113,7 +113,7 @@ impl<'a> BufAdvance<'a> {
         Ok(self.buffer)
     }
 
-    fn some_str(&self) -> Result<&'a [u8]> {
+    fn some_str(&self) -> Result<&'b [u8]> {
         ensure!(
             self.buffer.enough_to_parse(),
             NeedsMoreInputSnafu {
@@ -220,7 +220,7 @@ impl<'a> BufAdvance<'a> {
         }
     }
 
-    fn attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<usize>> {
+    fn attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         match memchr::memchr3(b'<', b'&', quote_style.to_ascii_char(), s) {
@@ -231,7 +231,7 @@ impl<'a> BufAdvance<'a> {
 
     /// Contrary to [`attribute_value`], this does not allow for
     /// less-than or ampersands inside the value.
-    fn plain_attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<usize>> {
+    fn plain_attribute_value(&mut self, quote_style: Quote) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         match memchr::memchr(quote_style.to_ascii_char(), s) {
@@ -241,14 +241,14 @@ impl<'a> BufAdvance<'a> {
     }
 
     /// Anything that's not `<` or `&` so long as it doesn't include `]]>`
-    fn char_data(&self) -> Result<Streaming<usize>> {
+    fn char_data(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         Ok(s.char_data().partial_thing())
     }
 
     /// Anything that's not `]]>`
-    fn cdata(&self) -> Result<Streaming<usize>> {
+    fn cdata(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.min_bytes(3));
 
         match memmem::find(s, b"]]>") {
@@ -262,7 +262,7 @@ impl<'a> BufAdvance<'a> {
         }
     }
 
-    fn processing_instruction_value(&self) -> Result<Streaming<usize>> {
+    fn processing_instruction_value(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.min_bytes(2));
 
         match memmem::find(s, b"?>") {
@@ -274,7 +274,7 @@ impl<'a> BufAdvance<'a> {
         }
     }
 
-    fn comment(&self) -> Result<Streaming<usize>> {
+    fn comment(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.min_bytes(2));
 
         match memmem::find(s, b"--") {
@@ -305,25 +305,25 @@ impl<'a> BufAdvance<'a> {
         Ok(s.len())
     }
 
-    fn reference_decimal(&self) -> Result<Streaming<usize>> {
+    fn reference_decimal(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         Ok(s.reference_decimal().partial_thing())
     }
 
-    fn reference_hex(&self) -> Result<Streaming<usize>> {
+    fn reference_hex(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         Ok(s.reference_hex().partial_thing())
     }
 
-    fn ncname(&self) -> Result<Streaming<usize>> {
+    fn ncname(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         Ok(s.nc_name().partial_thing())
     }
 
-    fn ncname_continuation(&self) -> Result<Streaming<usize>> {
+    fn ncname_continuation(&self) -> Result<Streaming<&'b str>> {
         let s = abandon!(self.some_str());
 
         Ok(s.nc_name_continuation().partial_thing())
@@ -335,20 +335,20 @@ impl<'a> BufAdvance<'a> {
 }
 
 #[ext]
-impl (&str, &[u8]) {
-    fn partial_thing(self) -> Streaming<usize> {
+impl<'b> (&'b str, &[u8]) {
+    fn partial_thing(self) -> Streaming<&'b str> {
         let (value, remainder) = self;
 
         if remainder.enough_to_parse() || value.is_empty() {
-            Streaming::Complete(value.len())
+            Streaming::Complete(value)
         } else {
-            Streaming::Partial(value.len())
+            Streaming::Partial(value)
         }
     }
 
-    fn complete_thing(self) -> Streaming<usize> {
+    fn complete_thing(self) -> Streaming<&'b str> {
         let (value, _remainder) = self;
-        Streaming::Complete(value.len())
+        Streaming::Complete(value)
     }
 }
 
@@ -473,31 +473,31 @@ pub struct TokenContext {
     pub pre: usize,
 }
 
-type IndexTokenInner = UniformToken<Streaming<usize>>;
-type IndexToken = (TokenContext, IndexTokenInner);
+type IndexTokenInner<'a> = UniformToken<Streaming<&'a str>>;
+type IndexToken<'a> = (TokenContext, IndexTokenInner<'a>);
 
-fn token_length(t: IndexTokenInner) -> usize {
-    match t {
+fn token_length(t: IndexTokenInner<'_>) -> usize {
+    let v = match t {
         Token::DeclarationStart(l) => *l.unify(),
         Token::DeclarationEncoding(l) => *l.unify(),
         Token::DeclarationStandalone(l) => *l.unify(),
-        Token::DeclarationClose => 0,
+        Token::DeclarationClose => "",
         Token::ElementOpenStart(l) => *l.unify(),
         Token::ElementOpenStartSuffix(l) => *l.unify(),
-        Token::ElementOpenStartComplete => 0,
-        Token::ElementOpenEnd => 0,
-        Token::ElementSelfClose => 0,
+        Token::ElementOpenStartComplete => "",
+        Token::ElementOpenEnd => "",
+        Token::ElementSelfClose => "",
         Token::ElementClose(l) => *l.unify(),
         Token::ElementCloseSuffix(l) => *l.unify(),
-        Token::ElementCloseComplete => 0,
+        Token::ElementCloseComplete => "",
         Token::AttributeStart(l) => *l.unify(),
         Token::AttributeStartSuffix(l) => *l.unify(),
-        Token::AttributeStartComplete => 0,
+        Token::AttributeStartComplete => "",
         Token::AttributeValueLiteral(l) => *l.unify(),
         Token::AttributeValueReferenceNamed(l) => *l.unify(),
         Token::AttributeValueReferenceDecimal(l) => *l.unify(),
         Token::AttributeValueReferenceHex(l) => *l.unify(),
-        Token::AttributeValueEnd => 0,
+        Token::AttributeValueEnd => "",
         Token::CharData(l) => *l.unify(),
         Token::CData(l) => *l.unify(),
         Token::ReferenceNamed(l) => *l.unify(),
@@ -505,9 +505,11 @@ fn token_length(t: IndexTokenInner) -> usize {
         Token::ReferenceHex(l) => *l.unify(),
         Token::ProcessingInstructionStart(l) => *l.unify(),
         Token::ProcessingInstructionValue(l) => *l.unify(),
-        Token::ProcessingInstructionEnd => 0,
+        Token::ProcessingInstructionEnd => "",
         Token::Comment(l) => *l.unify(),
-    }
+    };
+
+    v.len()
 }
 
 #[derive(Debug, Default)]
@@ -519,16 +521,16 @@ macro_rules! dispatch_namespaced_name {
     ($s:ident, $t:ident) => {
         paste::paste! {
             #[inline]
-            fn [<dispatch_stream_ $s>](
+            fn [<dispatch_stream_ $s>]<'b>(
                 &mut self,
-                buffer: BufAdvance<'_>,
-                f: impl for<'a> FnOnce(&mut BufAdvance<'a>) -> Result<Streaming<usize>>,
-            ) -> Result<Option<IndexToken>> {
+                buffer: BufAdvance<'b>,
+                f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
+            ) -> Result<Option<IndexToken<'b>>> {
                 self.stream_from_buffer(buffer, f, State::[<After $s:camel>], Token::[<$t:camel>])
             }
 
             #[inline]
-            fn [<dispatch_after_ $s>](&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $s>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
                 if *buffer.consume(":")? {
                     self.ratchet(State::[<Stream $s:camel Suffix>], &mut buffer);
                     self.[<dispatch_stream_ $s _suffix>](buffer, |b| b.ncname())
@@ -539,16 +541,16 @@ macro_rules! dispatch_namespaced_name {
             }
 
             #[inline]
-            fn [<dispatch_stream_ $s _suffix>](
+            fn [<dispatch_stream_ $s _suffix>]<'b>(
                 &mut self,
-                buffer: BufAdvance<'_>,
-                f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
-            ) -> Result<Option<IndexToken>> {
+                buffer: BufAdvance<'b>,
+                f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
+            ) -> Result<Option<IndexToken<'b>>> {
                 self.stream_from_buffer(buffer, f, State::[<After $s:camel Suffix>], Token::[<$t:camel Suffix>])
             }
 
             #[inline]
-            fn [<dispatch_after_ $s _suffix>](&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $s _suffix>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
                 self.ratchet(State::[<After $s:camel Complete>], &mut buffer);
                 let token_ctx = buffer.into_token_context();
                 Ok(Some((token_ctx, Token::[<$t:camel Complete>])))
@@ -561,7 +563,7 @@ macro_rules! dispatch_eq_value {
     ($k:ident $($suffix:ident)?) => {
         paste::paste! {
             #[inline]
-            fn [<dispatch_after_ $k $(_ $suffix)?>](&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $k $(_ $suffix)?>]<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
                 self.consume_space(
                     buffer,
                     State::[<After $k:camel Space>],
@@ -569,7 +571,7 @@ macro_rules! dispatch_eq_value {
                 )
             }
 
-            fn [<dispatch_after_ $k _space>](&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $k _space>]<'b>(&mut self, mut buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
                 use State::*;
 
                 buffer.require(b"=")?;
@@ -578,7 +580,7 @@ macro_rules! dispatch_eq_value {
                 self.[<dispatch_after_ $k _equals>](buffer)
             }
 
-            fn [<dispatch_after_ $k _equals>](&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+            fn [<dispatch_after_ $k _equals>]<'b>(&mut self, buffer: BufAdvance<'b>) -> Result<Option<IndexToken<'b>>> {
                 self.consume_space(
                     buffer,
                     State::[<After $k:camel EqualsSpace>],
@@ -607,7 +609,11 @@ impl CoreParser {
     }
 
     #[inline]
-    pub fn next_index(&mut self, buffer: &[u8], exhausted: bool) -> Option<Result<IndexToken>> {
+    pub fn next_token<'b>(
+        &mut self,
+        buffer: &'b [u8],
+        exhausted: bool,
+    ) -> Option<Result<IndexToken<'b>>> {
         use State::*;
 
         let buffer = BufAdvance::new(buffer, exhausted);
@@ -797,7 +803,10 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_initial(&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+    fn dispatch_initial<'b>(
+        &mut self,
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         if *buffer.consume("<")? {
@@ -847,7 +856,7 @@ impl CoreParser {
             let v = buffer.char_data()?;
 
             match v {
-                Streaming::Complete(0) | Streaming::Partial(0) => {
+                Streaming::Complete(s) | Streaming::Partial(s) if s.is_empty() => {
                     let location = buffer.absolute_location();
                     return InvalidXmlSnafu { location }.fail();
                 }
@@ -867,10 +876,10 @@ impl CoreParser {
         }
     }
 
-    fn dispatch_after_declaration_open(
+    fn dispatch_after_declaration_open<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationOpenSpace,
@@ -878,10 +887,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_declaration_open_space(
+    fn dispatch_after_declaration_open_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         buffer.require(b"version")?;
         self.ratchet(State::AfterDeclarationVersionAttribute, &mut buffer);
         self.dispatch_after_declaration_version_attribute(buffer)
@@ -889,21 +898,21 @@ impl CoreParser {
 
     dispatch_eq_value!(declaration_version_attribute);
 
-    fn dispatch_after_declaration_version_attribute_equals_space(
+    fn dispatch_after_declaration_version_attribute_equals_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         let quote = buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationVersion(quote), &mut buffer);
         self.dispatch_stream_declaration_version(buffer, quote)
     }
 
-    fn dispatch_stream_declaration_version(
+    fn dispatch_stream_declaration_version<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         let value = buffer.plain_attribute_value(quote)?;
@@ -917,11 +926,11 @@ impl CoreParser {
         Ok(Some((token_ctx, DeclarationStart(value))))
     }
 
-    fn dispatch_after_declaration_version_value(
+    fn dispatch_after_declaration_version_value<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(quote.as_ref())?;
@@ -930,10 +939,10 @@ impl CoreParser {
         self.dispatch_after_declaration_version(buffer)
     }
 
-    fn dispatch_after_declaration_version(
+    fn dispatch_after_declaration_version<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationVersionSpace,
@@ -941,10 +950,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_declaration_version_space(
+    fn dispatch_after_declaration_version_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         // TODO: this should require that we've seen a space in order to be allowed
@@ -959,21 +968,21 @@ impl CoreParser {
 
     dispatch_eq_value!(declaration_encoding_attribute);
 
-    fn dispatch_after_declaration_encoding_attribute_equals_space(
+    fn dispatch_after_declaration_encoding_attribute_equals_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         let quote = buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationEncoding(quote), &mut buffer);
         self.dispatch_stream_declaration_encoding(buffer, quote)
     }
 
-    fn dispatch_stream_declaration_encoding(
+    fn dispatch_stream_declaration_encoding<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         let value = buffer.plain_attribute_value(quote)?;
@@ -987,11 +996,11 @@ impl CoreParser {
         Ok(Some((token_ctx, DeclarationEncoding(value))))
     }
 
-    fn dispatch_after_declaration_encoding_value(
+    fn dispatch_after_declaration_encoding_value<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(quote.as_ref())?;
@@ -1000,10 +1009,10 @@ impl CoreParser {
         self.dispatch_after_declaration_encoding(buffer)
     }
 
-    fn dispatch_after_declaration_encoding(
+    fn dispatch_after_declaration_encoding<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationEncodingSpace,
@@ -1011,10 +1020,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_declaration_encoding_space(
+    fn dispatch_after_declaration_encoding_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         if *buffer.consume("standalone")? {
@@ -1028,21 +1037,21 @@ impl CoreParser {
 
     dispatch_eq_value!(declaration_standalone_attribute);
 
-    fn dispatch_after_declaration_standalone_attribute_equals_space(
+    fn dispatch_after_declaration_standalone_attribute_equals_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         let quote = buffer.require_quote()?;
 
         self.ratchet(State::StreamDeclarationStandalone(quote), &mut buffer);
         self.dispatch_stream_declaration_standalone(buffer, quote)
     }
 
-    fn dispatch_stream_declaration_standalone(
+    fn dispatch_stream_declaration_standalone<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         let value = buffer.plain_attribute_value(quote)?;
@@ -1056,11 +1065,11 @@ impl CoreParser {
         Ok(Some((token_ctx, DeclarationStandalone(value))))
     }
 
-    fn dispatch_after_declaration_standalone_value(
+    fn dispatch_after_declaration_standalone_value<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(quote.as_ref())?;
@@ -1069,10 +1078,10 @@ impl CoreParser {
         self.dispatch_after_declaration_standalone(buffer)
     }
 
-    fn dispatch_after_declaration_standalone(
+    fn dispatch_after_declaration_standalone<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterDeclarationStandaloneSpace,
@@ -1080,10 +1089,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_declaration_standalone_space(
+    fn dispatch_after_declaration_standalone_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         buffer.require(b"?>")?;
@@ -1095,10 +1104,10 @@ impl CoreParser {
 
     dispatch_namespaced_name!(element_open_name, ElementOpenStart);
 
-    fn dispatch_after_element_open_name_complete(
+    fn dispatch_after_element_open_name_complete<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         if *buffer.consume("/>")? {
@@ -1119,10 +1128,10 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_after_element_open_name_required_space(
+    fn dispatch_after_element_open_name_required_space<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterElementOpenNameSpace,
@@ -1131,10 +1140,10 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_after_element_open_name_space(
+    fn dispatch_after_element_open_name_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         if *buffer.consume("/>")? {
@@ -1154,10 +1163,10 @@ impl CoreParser {
     dispatch_namespaced_name!(attribute_name, AttributeStart);
     dispatch_eq_value!(attribute_name complete);
 
-    fn dispatch_after_attribute_name_equals_space(
+    fn dispatch_after_attribute_name_equals_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         let quote = buffer.require_quote()?;
@@ -1166,11 +1175,11 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_after_attribute_open_quote(
+    fn dispatch_after_attribute_open_quote<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         if *buffer.consume(quote)? {
@@ -1190,7 +1199,7 @@ impl CoreParser {
             let value = buffer.attribute_value(quote)?;
 
             match value {
-                Streaming::Complete(0) | Streaming::Partial(0) => {
+                Streaming::Complete(s) | Streaming::Partial(s) if s.is_empty() => {
                     return InvalidCharacterInAttributeSnafu {
                         location: buffer.absolute_location(),
                     }
@@ -1213,12 +1222,12 @@ impl CoreParser {
     }
 
     // -- todo: copy-pastad
-    fn dispatch_stream_attribute_value_reference_named(
+    fn dispatch_stream_attribute_value_reference_named<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
+        buffer: BufAdvance<'b>,
         quote: Quote,
-        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
+        f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             f,
@@ -1227,11 +1236,11 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_stream_attribute_value_reference_decimal(
+    fn dispatch_stream_attribute_value_reference_decimal<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
+        buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_decimal(),
@@ -1240,11 +1249,11 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_stream_attribute_value_reference_hex(
+    fn dispatch_stream_attribute_value_reference_hex<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
+        buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_hex(),
@@ -1253,11 +1262,11 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_attribute_value_reference(
+    fn dispatch_after_attribute_value_reference<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(b";")?;
@@ -1267,11 +1276,11 @@ impl CoreParser {
     // ---
 
     #[inline]
-    fn dispatch_stream_attribute_value_literal(
+    fn dispatch_stream_attribute_value_literal<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         quote: Quote,
-    ) -> Result<Option<IndexToken>> {
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         let value = buffer.attribute_value(quote)?;
@@ -1288,10 +1297,10 @@ impl CoreParser {
     dispatch_namespaced_name!(element_close_name, ElementClose);
 
     #[inline]
-    fn dispatch_after_element_close_name_complete(
+    fn dispatch_after_element_close_name_complete<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterElementCloseNameSpace,
@@ -1300,10 +1309,10 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_after_element_close_name_space(
+    fn dispatch_after_element_close_name_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(b">")?;
@@ -1313,18 +1322,18 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_stream_reference_named(
+    fn dispatch_stream_reference_named<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+        f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(buffer, f, State::AfterReference, Token::ReferenceNamed)
     }
 
-    fn dispatch_stream_reference_decimal(
+    fn dispatch_stream_reference_decimal<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_decimal(),
@@ -1333,10 +1342,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_stream_reference_hex(
+    fn dispatch_stream_reference_hex<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             |b| b.reference_hex(),
@@ -1346,10 +1355,10 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_after_reference(
+    fn dispatch_after_reference<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(b";")?;
@@ -1357,11 +1366,11 @@ impl CoreParser {
         self.dispatch_initial(buffer)
     }
 
-    fn dispatch_stream_processing_instruction_name(
+    fn dispatch_stream_processing_instruction_name<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+        f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             f,
@@ -1370,10 +1379,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_processing_instruction_name(
+    fn dispatch_after_processing_instruction_name<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         if *buffer.consume("?>")? {
@@ -1389,10 +1398,10 @@ impl CoreParser {
         }
     }
 
-    fn dispatch_after_processing_instruction_name_required_space(
+    fn dispatch_after_processing_instruction_name_required_space<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.consume_space(
             buffer,
             State::AfterProcessingInstructionNameSpace,
@@ -1400,10 +1409,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_processing_instruction_name_space(
+    fn dispatch_after_processing_instruction_name_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         if *buffer.consume("?>")? {
@@ -1416,10 +1425,10 @@ impl CoreParser {
         }
     }
 
-    fn dispatch_stream_processing_instruction_value(
+    fn dispatch_stream_processing_instruction_value<'b>(
         &mut self,
-        buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(
             buffer,
             |b| b.processing_instruction_value(),
@@ -1428,10 +1437,10 @@ impl CoreParser {
         )
     }
 
-    fn dispatch_after_processing_instruction_value(
+    fn dispatch_after_processing_instruction_value<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-    ) -> Result<Option<IndexToken>> {
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use {State::*, Token::*};
 
         buffer.require(b"?>")?;
@@ -1442,15 +1451,24 @@ impl CoreParser {
     }
 
     #[inline]
-    fn dispatch_stream_char_data(&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_char_data<'b>(
+        &mut self,
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(buffer, |b| b.char_data(), State::Initial, Token::CharData)
     }
 
-    fn dispatch_stream_cdata(&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_cdata<'b>(
+        &mut self,
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(buffer, |b| b.cdata(), State::AfterCData, Token::CData)
     }
 
-    fn dispatch_after_cdata(&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+    fn dispatch_after_cdata<'b>(
+        &mut self,
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require(b"]]>")?;
@@ -1459,11 +1477,17 @@ impl CoreParser {
         self.dispatch_initial(buffer)
     }
 
-    fn dispatch_stream_comment(&mut self, buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+    fn dispatch_stream_comment<'b>(
+        &mut self,
+        buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         self.stream_from_buffer(buffer, |b| b.comment(), State::AfterComment, Token::Comment)
     }
 
-    fn dispatch_after_comment(&mut self, mut buffer: BufAdvance<'_>) -> Result<Option<IndexToken>> {
+    fn dispatch_after_comment<'b>(
+        &mut self,
+        mut buffer: BufAdvance<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         use State::*;
 
         buffer.require_or_else(b"-->", |location| {
@@ -1476,12 +1500,12 @@ impl CoreParser {
 
     // ----------
 
-    fn require_space(
+    fn require_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         next_state: State,
-        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'_>) -> Result<Option<IndexToken>>,
-    ) -> Result<Option<IndexToken>> {
+        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'b>) -> Result<Option<IndexToken<'b>>>,
+    ) -> Result<Option<IndexToken<'b>>> {
         match buffer.consume_space() {
             Ok(0) => RequiredSpaceMissingSnafu {
                 location: buffer.absolute_location(),
@@ -1500,12 +1524,12 @@ impl CoreParser {
         }
     }
 
-    fn consume_space(
+    fn consume_space<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
+        mut buffer: BufAdvance<'b>,
         next_state: State,
-        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'_>) -> Result<Option<IndexToken>>,
-    ) -> Result<Option<IndexToken>> {
+        next_state_fn: impl FnOnce(&mut Self, BufAdvance<'b>) -> Result<Option<IndexToken<'b>>>,
+    ) -> Result<Option<IndexToken<'b>>> {
         buffer.consume_space()?;
 
         self.ratchet(next_state, &mut buffer);
@@ -1513,13 +1537,13 @@ impl CoreParser {
     }
 
     #[inline]
-    fn stream_from_buffer(
+    fn stream_from_buffer<'b>(
         &mut self,
-        mut buffer: BufAdvance<'_>,
-        f: impl FnOnce(&mut BufAdvance<'_>) -> Result<Streaming<usize>>,
+        mut buffer: BufAdvance<'b>,
+        f: impl FnOnce(&mut BufAdvance<'b>) -> Result<Streaming<&'b str>>,
         next_state: State,
-        create: impl FnOnce(Streaming<usize>) -> IndexTokenInner,
-    ) -> Result<Option<IndexToken>> {
+        create: impl FnOnce(Streaming<&'b str>) -> IndexTokenInner<'b>,
+    ) -> Result<Option<IndexToken<'b>>> {
         let value = f(&mut buffer)?;
 
         if value.is_complete() {
@@ -1744,11 +1768,7 @@ where
         }
     }
 
-    // This method (and similar methods that return `usize` or other
-    // non-reference types) are a workaround for the current
-    // limitations of the borrow checker. If Polonius is ever merged,
-    // this can be simplified.
-    pub fn next_index(&mut self) -> Option<Result<UniformToken<Streaming<usize>>>> {
+    pub fn next_token(&mut self) -> Option<Result<IndexTokenInner<'_>>> {
         let Self {
             source,
             parser,
@@ -1756,27 +1776,37 @@ where
             to_advance,
         } = self;
 
+        let mut source = source;
+
         let a = mem::take(to_advance);
         source.consume(a);
 
-        let mut r = loop {
-            match parser.next_index(source.buffer(), *exhausted) {
-                None => { /* Get more data */ }
+        loop {
+            let consumed = source.consumed();
 
-                Some(Err(e)) => {
-                    if let Some(a) = e.needs_more_input() {
-                        source.consume(a);
-                    } else {
-                        break Some(Err(e));
+            polonius_the_crab::polonius!(|source| -> Option<Result<IndexTokenInner<'polonius>>> {
+                match parser.next_token(source.buffer(), *exhausted) {
+                    None => { /* Get more data */ }
+
+                    Some(Err(mut e)) => {
+                        if let Some(a) = e.needs_more_input() {
+                            *to_advance = a;
+                        } else {
+                            e.advance_location(consumed);
+
+                            polonius_the_crab::polonius_return!(Some(Err(e)));
+                        }
+                    }
+
+                    Some(Ok((ctx, v))) => {
+                        *to_advance = ctx.pre + token_length(v);
+                        polonius_the_crab::polonius_return!(Some(Ok(v)));
                     }
                 }
+            });
 
-                Some(Ok((ctx, v))) => {
-                    source.consume(ctx.pre);
-                    *to_advance = token_length(v);
-                    break Some(Ok(v));
-                }
-            }
+            let a = mem::take(to_advance);
+            source.consume(a);
 
             source.move_to_front();
             let n_new_bytes = source.top_off();
@@ -1794,7 +1824,7 @@ where
                             }
                         }
                         Err(e) => Some(Err(e)),
-                    }
+                    };
                 }
 
                 Ok(0) => {
@@ -1806,18 +1836,7 @@ where
 
                 Err(e) => panic!("TODO: report this IO error {e} / {e:?}"),
             }
-        };
-
-        if let Some(Err(e)) = &mut r {
-            e.advance_location(source.consumed());
         }
-
-        r
-    }
-
-    pub fn next_str(&mut self) -> Option<Result<UniformToken<Streaming<&str>>>> {
-        let v = self.next_index();
-        v.map(move |r| r.map(move |s| s.map(move |t| t.map(move |idx| self.exchange(idx)))))
     }
 }
 
@@ -1858,29 +1877,6 @@ macro_rules! fuse_invoke {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum FusedIndex {
-    Buffered,
-    Direct(usize),
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct FusedIndexKind(());
-
-macro_rules! fused_index_kind {
-    ($($tt:tt $name:ident,)*) => { $(fused_index_kind! { @type $tt $name })* };
-
-    (@type pass $name:ident) => { };
-    (@type fuse $name:ident) => { type $name = FusedIndex; };
-    (@type stream $name:ident) => { type $name = Streaming<usize>; };
-}
-
-impl TokenKind for FusedIndexKind {
-    fuse_invoke!(fused_index_kind);
-}
-
-pub type FusedIndexToken = Token<FusedIndexKind>;
-
-#[derive(Debug, Copy, Clone)]
 pub struct FusedKind<'a>(PhantomData<&'a str>);
 
 macro_rules! fused_kind {
@@ -1897,22 +1893,6 @@ impl<'a> TokenKind for FusedKind<'a> {
 
 pub type FusedToken<'a> = Token<FusedKind<'a>>;
 
-trait Exchange {
-    fn exchange(&self, idx: usize) -> &str;
-}
-
-impl<R> Exchange for Parser<R> {
-    fn exchange(&self, idx: usize) -> &str {
-        let token = &self.source.buffer()[..idx];
-
-        // This is a large performance hole. We *know* that we returned an offset that would result
-        // in valid UTF-8, so we shouldn't need to re-validate it. However, `idx` comes from
-        // untrusted input and making this function `unsafe` ruins the callsites at the moment. We
-        // shouldn't need any of this when Polonius comes to town.
-        str::from_utf8(token).unwrap()
-    }
-}
-
 #[derive(Debug, Default)]
 struct FuseCore {
     buffer: String,
@@ -1920,8 +1900,8 @@ struct FuseCore {
 }
 
 impl FuseCore {
-    fn push(&mut self, t: IndexTokenInner, parser: &impl Exchange) -> Option<FusedIndexToken> {
-        use {FusedIndex::*, Streaming::*, Token::*};
+    fn push<'b, 't: 'b>(&'b mut self, t: IndexTokenInner<'t>) -> Option<FusedToken<'b>> {
+        use {Streaming::*, Token::*};
 
         let Self { buffer, current } = self;
 
@@ -1941,18 +1921,18 @@ impl FuseCore {
                     (Partial(v), None) => {
                         *current = Some($name(()));
                         buffer.clear();
-                        buffer.push_str(parser.exchange(v));
+                        buffer.push_str(v);
                         None
                     }
                     (Partial(v), Some($name(()))) => {
-                        buffer.push_str(parser.exchange(v));
+                        buffer.push_str(v);
                         None
                     }
-                    (Complete(v), None) => Some($name(Direct(v))),
+                    (Complete(v), None) => Some($name(v)),
                     (Complete(v), Some($name(()))) => {
                         *current = None;
-                        buffer.push_str(parser.exchange(v));
-                        Some($name(Buffered))
+                        buffer.push_str(v);
+                        Some($name(&buffer[..]))
                     }
                     (p, Some(c)) => unreachable!("While processing {:?}, had a cached {:?}", p, c),
                 }
@@ -1970,7 +1950,7 @@ impl FuseCore {
         fuse_invoke!(push_match)
     }
 
-    fn finish(&mut self) -> Result<Option<FusedIndexToken>, FuseError> {
+    fn finish(&mut self) -> Result<Option<FusedToken<'_>>, FuseError> {
         match self.current.take() {
             Some(_) => IncompleteSnafu.fail(),
             None => Ok(None),
@@ -1995,56 +1975,32 @@ where
         }
     }
 
-    pub fn next_index(&mut self) -> Option<Result<FusedIndexToken, FuseError>> {
-        let Self { inner, core } = self;
-        while let Some(t) = inner.next_index() {
-            match t {
-                Ok(t) => {
-                    if let Some(t) = core.push(t, inner) {
-                        return Some(Ok(t));
+    pub fn next_token(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
+        let mut this = self;
+
+        loop {
+            polonius_the_crab::polonius!(
+                |this| -> Option<Result<FusedToken<'polonius>, FuseError>> {
+                    let t = match this.inner.next_token() {
+                        Some(Ok(t)) => t,
+
+                        Some(Err(e)) => polonius_the_crab::polonius_return!(Some(Err(e.into()))),
+
+                        None => {
+                            let v = match this.core.finish() {
+                                Ok(v) => v.map(Ok),
+                                Err(e) => Some(Err(e)),
+                            };
+                            polonius_the_crab::polonius_return!(v);
+                        }
+                    };
+
+                    if let Some(t) = this.core.push(t) {
+                        polonius_the_crab::polonius_return!(Some(Ok(t)));
                     }
                 }
-                Err(e) => return Some(Err(e.into())),
-            }
+            )
         }
-
-        match core.finish() {
-            Ok(v) => v.map(Ok),
-            Err(e) => Some(Err(e)),
-        }
-    }
-
-    pub fn next_str(&mut self) -> Option<Result<FusedToken<'_>, FuseError>> {
-        let v = self.next_index();
-        v.map(move |r| r.map(move |t| self.exchange(t)))
-    }
-
-    pub fn exchange(&self, token: FusedIndexToken) -> FusedToken<'_> {
-        use {FusedIndex::*, Token::*};
-
-        macro_rules! exchange_match {
-            ($($tt:tt $name:ident,)*) => {
-                match token {
-                    $( exchange_match!(@pat $tt $name s) => exchange_match!(@arm $tt $name s), )*
-                }
-            };
-
-            (@pat pass $name:ident $s:ident) => { $name };
-            (@arm pass $name:ident $s:ident) => { $name };
-
-            (@pat fuse $name:ident $s:ident) => { $name($s) };
-            (@arm fuse $name:ident $s:ident) => {
-                match $s {
-                    Buffered => $name(&*self.core.buffer),
-                    Direct(idx) => $name(self.inner.exchange(idx)),
-                }
-            };
-
-            (@pat stream $name:ident $s:ident) => { $name($s) };
-            (@arm stream $name:ident $s:ident) => { $name($s.map(|i| self.inner.exchange(i))) };
-        }
-
-        fuse_invoke!(exchange_match)
     }
 }
 
@@ -3089,7 +3045,7 @@ mod test {
     {
         fn collect_owned(&mut self) -> super::Result<OwnedTokens> {
             let mut v = vec![];
-            while let Some(t) = self.next_str() {
+            while let Some(t) = self.next_token() {
                 v.push(t?.map(|s| s.map(str::to_owned)));
             }
             Ok(v)
@@ -3115,9 +3071,7 @@ mod test {
 
     #[ext]
     impl FusedOwnedToken {
-        fn from_index(token: FusedIndexToken, buffer: &str, source: &impl Exchange) -> Self {
-            use FusedIndex::*;
-
+        fn from_ref(token: FusedToken<'_>) -> Self {
             macro_rules! fuse_all_match {
                 ($($tt:tt $name:ident,)*) => {
                     match token {
@@ -3129,73 +3083,33 @@ mod test {
                 (@arm pass $name:ident $s:ident) => { $name };
 
                 (@pat fuse $name:ident $s:ident) => { $name($s) };
-                (@arm fuse $name:ident $s:ident) => {
-                    match $s {
-                        Buffered => $name(buffer.to_string()),
-                        Direct(idx) => $name(source.exchange(idx).to_string()),
-                    }
-                };
+                (@arm fuse $name:ident $s:ident) => { $name($s.to_string()) };
 
                 (@pat stream $name:ident $s:ident) => { $name($s) };
-                (@arm stream $name:ident $s:ident) => { $name($s.map(|i| source.exchange(i).to_string())) };
+                (@arm stream $name:ident $s:ident) => { $name($s.map(|i| i.to_string())) };
             }
 
             fuse_invoke!(fuse_all_match)
         }
     }
 
-    #[derive(Debug)]
-    struct BufferedParser<'a>(Vec<&'a str>);
-
-    impl<'a> BufferedParser<'a> {
-        fn new(
-            tokens: impl IntoIterator<Item = UniformToken<Streaming<&'a str>>>,
-        ) -> (Self, Vec<IndexTokenInner>) {
-            let mut buffered = vec![];
-            let mut index_tokens = vec![];
-            let mut index = 0;
-
-            for t in tokens {
-                let t = t.map(|s| {
-                    s.map(|v| {
-                        buffered.push(v);
-                        let i = index;
-                        index += 1;
-                        i
-                    })
-                });
-                index_tokens.push(t);
-            }
-
-            (BufferedParser(buffered), index_tokens)
-        }
-    }
-
-    impl Exchange for BufferedParser<'_> {
-        fn exchange(&self, idx: usize) -> &str {
-            self.0[idx]
-        }
-    }
-
     impl FuseCore {
         fn fuse_all<'a>(
-            tokens: impl IntoIterator<Item = UniformToken<Streaming<&'a str>>>,
+            tokens: impl IntoIterator<Item = IndexTokenInner<'a>>,
         ) -> super::Result<Vec<FusedOwnedToken>, super::FuseError> {
-            let (parser, index_tokens) = BufferedParser::new(tokens);
-
             let mut collected = vec![];
             let mut me = Self::default();
 
-            for token in index_tokens {
+            for token in tokens {
                 collected.extend({
-                    let idx = me.push(token, &parser);
-                    idx.map(|i| FusedOwnedToken::from_index(i, &me.buffer, &parser))
+                    let idx = me.push(token);
+                    idx.map(FusedOwnedToken::from_ref)
                 });
             }
 
             collected.extend({
                 let idx = me.finish()?;
-                idx.map(|i| FusedOwnedToken::from_index(i, &me.buffer, &parser))
+                idx.map(FusedOwnedToken::from_ref)
             });
 
             Ok(collected)
