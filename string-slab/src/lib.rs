@@ -47,7 +47,7 @@ impl PartialEq for RawStr {
     fn eq(&self, other: &Self) -> bool {
         // We only care about pointer equality as we don't reuse a pointer for more than one string
         // value.
-        self.0 == other.0
+        ptr::eq(self.0, other.0)
     }
 }
 
