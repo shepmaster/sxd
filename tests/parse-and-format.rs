@@ -23,7 +23,7 @@ fn round_trips_xml() -> Result {
     let mut output = Vec::new();
     let mut fmt = Formatter::new(&mut output);
 
-    while let Some(token) = parser.next_str() {
+    while let Some(token) = parser.next_token() {
         let token = token?;
         fmt.write_token(token)?;
     }

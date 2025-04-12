@@ -3,20 +3,18 @@ use std::{env, path::PathBuf};
 fn main() {
     let lib = pkg_config::probe_library("libxml-2.0").expect("Can't find libxml2");
 
+    dbg!(&lib);
+
     let mut builder = bindgen::Builder::default();
 
     for inc in &lib.include_paths {
-        // The input header we would like to generate
-        // bindings for.
-        let p = inc.join("libxml/parser.h");
-        builder = builder
-            .header(p.display().to_string())
-            .clang_arg(format!("-I{}", inc.display()));
+        builder = builder.clang_arg(format!("-I{}", inc.display()));
     }
 
     let builder = builder
-        // https://github.com/rust-lang/rust-bindgen/issues/1651
-        .layout_tests(false)
+        // The input header we would like to generate
+        // bindings for.
+        .header("src/wrapper.h")
         // Uses 128-bit types which aren't FFI safe
         .blocklist_function("qecvt")
         .blocklist_function("qecvt_r")
@@ -26,9 +24,12 @@ fn main() {
         .blocklist_function("strtold")
         .blocklist_type("_Float64x")
         .blocklist_type("max_align_t")
+        // API changed between versions; this has manual bindings
+        // https://gitlab.gnome.org/GNOME/libxml2/-/issues/622
+        .blocklist_type("xmlStructuredErrorFunc")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks));
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
     dbg!(&builder);
 

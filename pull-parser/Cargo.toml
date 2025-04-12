@@ -7,12 +7,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+xml-str = { package = "sxd-xml-str", path = "../xml-str" }
 token = { package = "sxd-token", path = "../token" }
 
 snafu.workspace = true
 easy-ext = "1.0.0"
 memchr = "2.3.4"
 paste = "1.0.5"
+polonius-the-crab = "0.4.2"
 
 [dev-dependencies]
 iai = "0.1.1"

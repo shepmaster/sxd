@@ -16,13 +16,27 @@ mod ffi {
     #![allow(clippy::all)]
 
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+    pub type xmlStructuredErrorFunc = ::std::option::Option<
+        unsafe extern "C" fn(userData: *mut ::std::os::raw::c_void, error: *const xmlError),
+    >;
 }
 
-pub fn parse(s: &str) -> Result<String> {
-    Document::parse(s).map(|d| d.to_string())
+#[test]
+fn expected_version() {
+    let v = CStr::from_bytes_until_nul(ffi::LIBXML_DOTTED_VERSION).unwrap_or_default();
+    let v = v.to_str().unwrap_or_default();
+    assert!(
+        v.starts_with("2.13."),
+        "This LibXML version is {v}, we expect 2.13"
+    );
 }
 
-unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *mut ffi::xmlError) {
+pub fn parse(d: &[u8]) -> Result<String> {
+    Document::parse(d).map(|d| d.to_string())
+}
+
+unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *const ffi::xmlError) {
     let ctx = ctx as *mut ffi::xmlParserCtxt;
 
     if let (Some(ctx), Some(error)) = (ctx.as_ref(), error.as_ref()) {
@@ -37,8 +51,8 @@ unsafe extern "C" fn global_error_handler(ctx: *mut c_void, error: *mut ffi::xml
 struct Document(*mut ffi::_xmlDoc);
 
 impl Document {
-    fn parse(s: &str) -> Result<Document> {
-        if s.contains('\0') {
+    fn parse(d: &[u8]) -> Result<Document> {
+        if d.contains(&b'\0') {
             return Err(Error::high_level(
                 "libxml2 stops processing at embedded NULs; treating this as a failure",
             ));
@@ -51,8 +65,8 @@ impl Document {
             (*ctx)._private = &mut errors as *mut _ as *mut c_void;
             ffi::xmlSetStructuredErrorFunc(ctx as _, Some(global_error_handler));
 
-            let buf = s.as_ptr() as *const c_char;
-            let buf_len = s.len().try_into().expect("Can't fit size");
+            let buf = d.as_ptr() as *const c_char;
+            let buf_len = d.len().try_into().expect("Can't fit size");
             let url = ptr::null();
             let encoding = ptr::null();
             let options = ffi::xmlParserOption_XML_PARSE_PEDANTIC as _;
@@ -140,6 +154,7 @@ impl Error {
                 | ffi::xmlParserErrors_XML_WAR_SPACE_VALUE // `xml:space` invalid
                 | ffi::xmlParserErrors_XML_NS_ERR_UNDEFINED_NAMESPACE
                 | ffi::xmlParserErrors_XML_DTD_XMLID_VALUE // `xml:id="1"`
+                | ffi::xmlParserErrors_XML_DTD_ID_REDEFINED // `xml:id="1"` twice
                 => Ok(()),
 
             _ => {

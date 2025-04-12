@@ -7,6 +7,7 @@ use std::{
     fs::File,
     io::{self, BufWriter, Read, Write},
     str::FromStr,
+    time::Instant,
 };
 use validation::Validator;
 
@@ -24,6 +25,8 @@ where
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+
     let quiet = env::var_os("QUIET").is_some();
     let buffer_size = env_or("BUFFER_SIZE", 16 * 1024 * 1024);
     let input_buffer_size = env_or("INPUT_BUFFER_SIZE", buffer_size);
@@ -45,7 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stream_output(parser, out)
     }?;
 
-    eprintln!("Parsed {} tokens", count);
+    let elapsed = start.elapsed();
+    eprintln!("Parsed {count} tokens in {elapsed:?}");
 
     Ok(())
 }
@@ -55,7 +59,7 @@ fn stream_output(parser: Parser<impl Read>, out: impl Write) -> Result<usize> {
     let mut validator = Validator::new(parser);
     let mut fmt = Formatter::new(out);
 
-    while let Some(token) = validator.next_str() {
+    while let Some(token) = validator.next_token() {
         let token = token?;
         count += 1;
 

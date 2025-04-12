@@ -4,5 +4,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|d: &[u8]| {
-    let _ = comparison::parse(d);
+    comparison::assert_both(d);
 });

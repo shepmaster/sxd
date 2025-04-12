@@ -22,6 +22,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "lf_matches_libxml2"
+path = "fuzz_targets/matches_libxml2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "lf_parses_what_libxml2_parses"
 path = "fuzz_targets/parses_what_libxml2_parses.rs"
 test = false

@@ -5,6 +5,6 @@ extern crate afl;
 
 fn main() {
     fuzz!(|d: &[u8]| {
-        comparison::assert_both_fail(d);
+        comparison::assert_both(d);
     });
 }

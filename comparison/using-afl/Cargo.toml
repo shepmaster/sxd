@@ -10,6 +10,12 @@ comparison = { path = ".." }
 afl = "0.14.3"
 
 [[bin]]
+name = "afl_matches_libxml2"
+path = "src/matches_libxml2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "afl_parses_what_libxml2_parses"
 path = "src/parses_what_libxml2_parses.rs"
 test = false

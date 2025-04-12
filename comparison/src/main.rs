@@ -6,6 +6,10 @@ fn main() {
     let data = fs::read(filename).expect("Could not read data from file");
 
     match &*mode {
+        "both" => {
+            eprintln!("assert_both...");
+            comparison::assert_both(&data);
+        }
         "fail" => {
             eprintln!("assert_both_fail...");
             comparison::assert_both_fail(&data);

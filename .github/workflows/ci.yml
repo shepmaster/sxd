@@ -11,101 +11,75 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: rustfmt, clippy
-          profile: minimal
-          default: true
 
       - name: Run tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all
+        run: >-
+          cargo test --all
 
       - name: Lint code
-        if: ${{ always() }}
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all --all-targets
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo clippy --all --all-targets
 
       - name: Ensure code is formatted
-        if: ${{ always() }}
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo fmt --all -- --check
 
   comparison:
     runs-on: ubuntu-latest
 
-    env:
-      LLVM_CONFIG: llvm-config-12
-
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: rustfmt, clippy
-          profile: minimal
-          default: true
 
       - name: Lint code
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --manifest-path=comparison/Cargo.toml --all --all-targets
+        run: >-
+          cargo clippy --manifest-path=comparison/Cargo.toml --all --all-targets
 
       - name: Ensure code is formatted
-        if: ${{ always() }}
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --manifest-path=comparison/Cargo.toml --all -- --check
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo fmt --manifest-path=comparison/Cargo.toml --all -- --check
 
   fuzz:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: rustfmt, clippy
-          profile: minimal
-          default: true
 
       - name: Lint code
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --manifest-path=comparison/fuzz/Cargo.toml --all --all-targets
+        run: >-
+          cargo clippy --manifest-path=comparison/fuzz/Cargo.toml --all --all-targets
 
       - name: Ensure code is formatted
-        if: ${{ always() }}
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --manifest-path=comparison/fuzz/Cargo.toml --all -- --check
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo fmt --manifest-path=comparison/fuzz/Cargo.toml --all -- --check
 
   perf-information:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
