@@ -6,6 +6,6 @@ use proptest::prelude::*;
 proptest! {
     #[test]
     fn parses_everything_libxml2_does(d: Vec<u8>) {
-        comparison::assert_both_parse(&d);
+        fuzzing::assert_both_parse(&d);
     }
 }

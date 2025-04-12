@@ -16,6 +16,9 @@ lto = "thin"
 
 [workspace]
 members = [
+    "fuzzing",
+    "fuzzing/using-afl",
+    "fuzzing/using-proptest",
     "pull-parser",
     "string-slab",
     "string-slab/benchmarks",

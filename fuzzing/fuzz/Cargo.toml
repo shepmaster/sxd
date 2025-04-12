@@ -11,7 +11,7 @@ members = []
 cargo-fuzz = true
 
 [dependencies]
-comparison = { path = ".." }
+fuzzing = { path = ".." }
 
 libfuzzer-sys = "0.4"
 

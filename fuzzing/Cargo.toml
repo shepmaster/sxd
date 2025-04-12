@@ -1,14 +1,8 @@
 [package]
-name = "comparison"
+name = "fuzzing"
 version = "0.0.0"
 publish = false
 edition = "2021"
-
-[workspace]
-members = [
-    "using-afl",
-    "using-proptest",
-]
 
 [dependencies]
 sxd-pull-parser = { path = "../pull-parser" }

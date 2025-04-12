@@ -5,6 +5,6 @@ publish = false
 edition = "2021"
 
 [dependencies]
-comparison = { path = ".." }
+fuzzing = { path = ".." }
 
 proptest = "1.0"
