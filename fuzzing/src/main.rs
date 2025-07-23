@@ -8,15 +8,15 @@ fn main() {
     match &*mode {
         "both" => {
             eprintln!("assert_both...");
-            comparison::assert_both(&data);
+            fuzzing::assert_both(&data);
         }
         "fail" => {
             eprintln!("assert_both_fail...");
-            comparison::assert_both_fail(&data);
+            fuzzing::assert_both_fail(&data);
         }
         "parse" => {
             eprintln!("assert_both_parse...");
-            comparison::assert_both_parse(&data);
+            fuzzing::assert_both_parse(&data);
         }
         _ => panic!("Unknown mode (fail / parse)"),
     }
