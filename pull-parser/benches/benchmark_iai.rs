@@ -21,7 +21,7 @@ fn benchmark() {
 
     let count = parse(&file);
 
-    eprintln!("Parsed {} tokens", count);
+    eprintln!("Parsed {count} tokens");
 }
 
 iai::main!(benchmark);

@@ -5,17 +5,15 @@ pub impl str {
         let mut n_valid = 0;
         let mut chars = self.chars();
 
-        if let Some(c) = chars.next() {
-            if c.is_name_start_char() {
-                n_valid += c.len_utf8();
+        if let Some(c) = chars.next()
+            && c.is_name_start_char()
+        {
+            n_valid += c.len_utf8();
 
-                for c in chars {
-                    if c.is_name_char() {
-                        n_valid += c.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
+            while let Some(c) = chars.next()
+                && c.is_name_char()
+            {
+                n_valid += c.len_utf8();
             }
         }
 
