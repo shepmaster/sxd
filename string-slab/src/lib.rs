@@ -524,9 +524,7 @@ mod test {
 
                 assert!(
                     keys.iter().all(|k| first_key == k),
-                    "Not all interned keys for {} were equal: {:?}",
-                    s,
-                    keys,
+                    "Not all interned keys for {s} were equal: {keys:?}",
                 );
 
                 unsafe {

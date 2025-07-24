@@ -81,7 +81,7 @@ fn slab_vs_string_length(c: &mut Criterion) {
 
     for args in space {
         let (slab_size, max_str_len) = args;
-        let id = BenchmarkId::from_parameter(format_args!("{:06}x{:04}", slab_size, max_str_len));
+        let id = BenchmarkId::from_parameter(format_args!("{slab_size:06}x{max_str_len:04}"));
         let input = generate_with_duplicates(10_000, max_str_len);
 
         group.bench_with_input(id, &args, |b, &(slab_size, _max_str_len)| {

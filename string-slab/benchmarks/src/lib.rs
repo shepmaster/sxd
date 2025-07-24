@@ -149,7 +149,7 @@ where
 pub fn rng() -> StdRng {
     static SEED: LazyLock<u64> = LazyLock::new(|| {
         let seed = env_or_else("BENCHMARK_SEED", || rand::thread_rng().gen());
-        eprintln!("Using random seed {} (can be set via BENCHMARK_SEED)", seed);
+        eprintln!("Using random seed {seed} (can be set via BENCHMARK_SEED)");
         seed
     });
 

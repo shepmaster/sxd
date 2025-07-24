@@ -143,8 +143,8 @@ where
             ElementCloseComplete => write!(output, ">"),
             AttributeStart(v) => pre_post!(inside_attribute_start, (" "), v,),
             AttributeStartSuffix(v) => pre_post!(inside_attribute_start_suffix, (":"), v,),
-            AttributeStartComplete => write!(output, "={}", quote),
-            AttributeValueLiteral(v) => write!(output, "{}", v),
+            AttributeStartComplete => write!(output, "={quote}"),
+            AttributeValueLiteral(v) => write!(output, "{v}"),
             AttributeValueReferenceNamed(v) => {
                 pre_post!(inside_attribute_value_reference_named, ("&"), v, (";"))
             }
@@ -154,8 +154,8 @@ where
             AttributeValueReferenceHex(v) => {
                 pre_post!(inside_attribute_value_reference_hex, ("&#x"), v, (";"))
             }
-            AttributeValueEnd => write!(output, "{}", quote),
-            CharData(v) => write!(output, "{}", v),
+            AttributeValueEnd => write!(output, "{quote}"),
+            CharData(v) => write!(output, "{v}"),
             CData(v) => pre_post!(inside_reference_named, ("<![CDATA["), v, ("]]>")),
             ReferenceNamed(v) => pre_post!(inside_reference_named, ("&"), v, (";")),
             ReferenceDecimal(v) => pre_post!(inside_reference_decimal, ("&#"), v, (";")),
